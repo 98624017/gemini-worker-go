@@ -49,7 +49,8 @@ var proxyPrewarmSem = make(chan struct{}, MaxConcurrentInlineDataFetches)
 // bufPool recycles bytes.Buffer across JSON marshal calls to reduce GC pressure.
 var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
-// sseScannerBufPool recycles the large scanner buffer used per SSE response (~17 MiB each).
+// sseScannerBufPool recycles the large scanner buffer used per SSE response
+// (~15 MiB each: base64 expansion 4/3 of MaxImageBytes + 2 MiB line buffer).
 var sseScannerBufPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, MaxSSEScanTokenBytes)
