@@ -1,0 +1,29 @@
+# Build artifacts
+gemini-worker-go
+gemini-worker-go.exe
+main
+main.exe
+*.exe
+
+# Test / dev data
+response.json
+*.json
+
+# Dev server state
+.dev-server.log
+.dev-server.pid
+*.log
+*.pid
+
+# Go test cache
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
