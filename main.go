@@ -42,6 +42,29 @@ const (
 var markdownImageURLRe = regexp.MustCompile(`!\[[^\]]*\]\(\s*(https?://[^)\s]+)\s*\)`)
 var proxyPrewarmSem = make(chan struct{}, MaxConcurrentInlineDataFetches)
 
+// bufPool recycles bytes.Buffer across JSON marshal calls to reduce GC pressure.
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+// marshalJSON marshals v to JSON using a pooled buffer. The returned slice is a
+// fresh copy and is safe to use after marshalJSON returns.
+func marshalJSON(v any) ([]byte, error) {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	err := json.NewEncoder(buf).Encode(v)
+	var result []byte
+	if err == nil {
+		b := buf.Bytes()
+		// json.Encoder appends a trailing newline; trim it to match json.Marshal output.
+		if len(b) > 0 && b[len(b)-1] == '\n' {
+			b = b[:len(b)-1]
+		}
+		result = make([]byte, len(b))
+		copy(result, b)
+	}
+	bufPool.Put(buf)
+	return result, err
+}
+
 type Config struct {
 	UpstreamBaseURL          string
 	UpstreamAPIKey           string
@@ -714,7 +737,7 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 	inlineDataDur := time.Since(inlineDataStart)
 
 	// 5. Build Upstream Request
-	newBodyBytes, _ := json.Marshal(bodyMap)
+	newBodyBytes, _ := marshalJSON(bodyMap)
 	if adminEntry != nil {
 		adminEntry.RequestUpstream, adminEntry.RequestUpstreamImgs = sanitizeJSONForAdminLog(newBodyBytes)
 	}
@@ -845,7 +868,7 @@ func (app *App) handleNonStreamResponse(w http.ResponseWriter, resp *http.Respon
 	convertDur := time.Since(convertStart)
 
 	marshalStart := time.Now()
-	finalBytes, _ := json.Marshal(jsonBody)
+	finalBytes, _ := marshalJSON(jsonBody)
 	marshalDur := time.Since(marshalStart)
 
 	writeStart := time.Now()
@@ -924,7 +947,7 @@ func (app *App) handleStreamResponse(w http.ResponseWriter, resp *http.Response,
 					"status":  "ERROR",
 				},
 			}
-			newBytes, _ := json.Marshal(errObj)
+			newBytes, _ := marshalJSON(errObj)
 			fmt.Fprintf(w, "data: %s\n", string(newBytes))
 			w.(http.Flusher).Flush()
 			if adminEntry != nil {
@@ -941,7 +964,7 @@ func (app *App) handleStreamResponse(w http.ResponseWriter, resp *http.Response,
 			}
 		}
 
-		newBytes, _ := json.Marshal(jsonBody)
+		newBytes, _ := marshalJSON(jsonBody)
 		if adminEntry != nil {
 			lastDataJSON = newBytes
 		}
@@ -1998,7 +2021,7 @@ func geminiError(w http.ResponseWriter, code int, msg string) []byte {
 			"status":  "ERROR",
 		},
 	}
-	b, _ := json.Marshal(payload)
+	b, _ := marshalJSON(payload)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	if len(b) > 0 {
