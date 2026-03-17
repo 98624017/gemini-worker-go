@@ -6,7 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/json"
+	jsoniter "github.com/json-iterator/go"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +22,10 @@ import (
 	"sync"
 	"time"
 )
+
+// json is a drop-in replacement for encoding/json backed by json-iterator.
+// ConfigCompatibleWithStandardLibrary ensures identical marshaling behavior.
+var json = jsoniter.ConfigCompatibleWithStandardLibrary
 
 const (
 	MaxInlineDataUrls                = 5
