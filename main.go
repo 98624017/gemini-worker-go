@@ -134,6 +134,7 @@ type App struct {
 	InlineDataURLCache             *inlineDataURLDiskCache
 	InlineDataURLBackgroundFetcher *inlineDataBackgroundFetcher
 	AdminLogs                      *adminLogBuffer
+	AdminStats                     *adminStats
 }
 
 func newBaseTransport() *http.Transport {
@@ -461,6 +462,7 @@ func main() {
 	}
 	if cfg.AdminPassword != "" {
 		app.AdminLogs = newAdminLogBuffer(100)
+		app.AdminStats = &adminStats{}
 	}
 
 	mux := http.NewServeMux()
@@ -634,8 +636,9 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 
 	var adminEntry *adminLogEntry
 	if app != nil && app.AdminLogs != nil {
+		reqStart := time.Now()
 		adminEntry = &adminLogEntry{
-			CreatedAt:  time.Now(),
+			CreatedAt:  reqStart,
 			Method:     r.Method,
 			Path:       r.URL.Path,
 			Query:      r.URL.RawQuery,
@@ -643,7 +646,17 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 			IsStream:   isStream,
 		}
 		defer func() {
+			durationMs := time.Since(reqStart).Milliseconds()
+			adminEntry.DurationMs = durationMs
 			app.AdminLogs.Add(*adminEntry)
+
+			if app.AdminStats != nil {
+				app.AdminStats.totalRequests.Add(1)
+				if adminEntry.StatusCode >= 400 {
+					app.AdminStats.errorRequests.Add(1)
+				}
+				app.AdminStats.totalDurationMs.Add(durationMs)
+			}
 		}()
 	}
 
@@ -743,6 +756,9 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 				cacheHitMu.Lock()
 				cacheHits[rawURL] = struct{}{}
 				cacheHitMu.Unlock()
+				if app.AdminStats != nil {
+					app.AdminStats.cacheHits.Add(1)
+				}
 			}
 		}
 

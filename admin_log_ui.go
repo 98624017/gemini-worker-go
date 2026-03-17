@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,6 +25,7 @@ type adminLogEntry struct {
 	IsStream   bool      `json:"isStream"`
 	OutputMode string    `json:"outputMode"`
 	StatusCode int       `json:"statusCode"`
+	DurationMs int64    `json:"durationMs"`
 
 	RequestRaw               string   `json:"requestRaw"`
 	RequestRawImages         []string `json:"requestRawImages"`
@@ -41,6 +43,15 @@ type adminLogBuffer struct {
 	buf      []adminLogEntry
 	full     bool
 	nextIdx  int
+}
+
+// adminStats tracks aggregate request counters since process start.
+// All fields are accessed atomically; no lock needed.
+type adminStats struct {
+	totalRequests   atomic.Int64
+	errorRequests   atomic.Int64
+	totalDurationMs atomic.Int64
+	cacheHits       atomic.Int64
 }
 
 type limitedCaptureWriter struct {
@@ -191,6 +202,9 @@ func (app *App) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case "/admin/api/logs":
 		app.handleAdminAPILogs(w, r)
 		return
+	case "/admin/api/stats":
+		app.handleAdminAPIStats(w, r)
+		return
 	default:
 		http.NotFound(w, r)
 		return
@@ -214,6 +228,23 @@ func (app *App) handleAdminAPILogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"items": logs,
+	})
+}
+
+func (app *App) handleAdminAPIStats(w http.ResponseWriter, r *http.Request) {
+	var total, errors, durationMs, hits int64
+	if app != nil && app.AdminStats != nil {
+		total = app.AdminStats.totalRequests.Load()
+		errors = app.AdminStats.errorRequests.Load()
+		durationMs = app.AdminStats.totalDurationMs.Load()
+		hits = app.AdminStats.cacheHits.Load()
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"totalRequests":   total,
+		"errorRequests":   errors,
+		"totalDurationMs": durationMs,
+		"cacheHits":       hits,
 	})
 }
 
