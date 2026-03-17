@@ -551,17 +551,31 @@ const adminLogsHTML = `<!doctype html>
       document.getElementById('s-err').textContent    = fmtNum(errors);
       document.getElementById('s-cache').textContent  = hitPct;
       document.getElementById('s-cache-sub').textContent = fmtNum(hits) + ' 次命中';
-    } catch (_) {}
+    } catch (e) { console.error('[admin] loadStats failed:', e); }
   }
 
   // ── Logs ───────────────────────────────────────────
+
+  // safeUrl: only allow http/https absolute URLs and root-relative paths (/...).
+  // Rejects javascript: and other dangerous protocols.
+  function safeUrl(u) {
+    if (!u) return '';
+    if (u.startsWith('/')) return u;
+    try {
+      const p = new URL(u);
+      return (p.protocol === 'http:' || p.protocol === 'https:') ? u : '';
+    } catch (_) { return ''; }
+  }
+
   function renderImgs(urls, hits) {
     if (!urls || !urls.length) return '';
     const hitSet = new Set(hits || []);
     return '<div class="imgs">' + urls.map(u => {
+      const safe = safeUrl(u);
+      if (!safe) return '';
       const badge = hitSet.has(u) ? '<span class="cache-badge">CACHE</span>' : '';
-      return '<a class="img-thumb" href="'+esc(u)+'" target="_blank" rel="noreferrer">'
-           + badge + '<img src="'+esc(u)+'" alt="" loading="lazy"></a>';
+      return '<a class="img-thumb" href="'+esc(safe)+'" target="_blank" rel="noreferrer">'
+           + badge + '<img src="'+esc(safe)+'" alt="" loading="lazy"></a>';
     }).join('') + '</div>';
   }
 

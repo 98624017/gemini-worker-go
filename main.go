@@ -636,9 +636,8 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 
 	var adminEntry *adminLogEntry
 	if app != nil && app.AdminLogs != nil {
-		reqStart := time.Now()
 		adminEntry = &adminLogEntry{
-			CreatedAt:  reqStart,
+			CreatedAt:  start,
 			Method:     r.Method,
 			Path:       r.URL.Path,
 			Query:      r.URL.RawQuery,
@@ -646,17 +645,18 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 			IsStream:   isStream,
 		}
 		defer func() {
-			durationMs := time.Since(reqStart).Milliseconds()
-			adminEntry.DurationMs = durationMs
+			adminEntry.DurationMs = time.Since(start).Milliseconds()
 			app.AdminLogs.Add(*adminEntry)
-
-			if app.AdminStats != nil {
-				app.AdminStats.totalRequests.Add(1)
-				if adminEntry.StatusCode >= 400 {
-					app.AdminStats.errorRequests.Add(1)
-				}
-				app.AdminStats.totalDurationMs.Add(durationMs)
+		}()
+	}
+	if app != nil && app.AdminStats != nil {
+		defer func() {
+			durationMs := time.Since(start).Milliseconds()
+			app.AdminStats.totalRequests.Add(1)
+			if adminEntry != nil && adminEntry.StatusCode >= 400 {
+				app.AdminStats.errorRequests.Add(1)
 			}
+			app.AdminStats.totalDurationMs.Add(durationMs)
 		}()
 	}
 
@@ -748,15 +748,17 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 		var cacheHitMu sync.Mutex
 		cacheHits := make(map[string]struct{})
 		var observer func(rawURL string, fromCache bool)
-		if adminEntry != nil {
+		if adminEntry != nil || (app != nil && app.AdminStats != nil) {
 			observer = func(rawURL string, fromCache bool) {
 				if !fromCache {
 					return
 				}
-				cacheHitMu.Lock()
-				cacheHits[rawURL] = struct{}{}
-				cacheHitMu.Unlock()
-				if app.AdminStats != nil {
+				if adminEntry != nil {
+					cacheHitMu.Lock()
+					cacheHits[rawURL] = struct{}{}
+					cacheHitMu.Unlock()
+				}
+				if app != nil && app.AdminStats != nil {
 					app.AdminStats.cacheHits.Add(1)
 				}
 			}
