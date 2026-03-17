@@ -367,136 +367,327 @@ const adminLogsHTML = `<!doctype html>
   <title>banana-proxy 管理后台</title>
   <style>
     :root { color-scheme: dark; }
-    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Arial; background: #0b1020; color: #e6e9f2; }
-    header { position: sticky; top: 0; background: rgba(11,16,32,0.9); backdrop-filter: blur(8px); border-bottom: 1px solid rgba(255,255,255,0.08); padding: 14px 16px; z-index: 2; }
-    h1 { margin: 0; font-size: 16px; font-weight: 600; }
-    .sub { margin-top: 6px; font-size: 12px; color: rgba(230,233,242,0.7); }
-    main { padding: 16px; max-width: 1200px; margin: 0 auto; }
-    .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
-    button { background: #1a2455; color: #e6e9f2; border: 1px solid rgba(255,255,255,0.12); padding: 8px 10px; border-radius: 8px; cursor: pointer; }
-    button:hover { background: #223070; }
-    .card { border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; background: rgba(255,255,255,0.03); margin-bottom: 12px; overflow: hidden; }
-    .card-head { display: flex; justify-content: space-between; gap: 12px; padding: 12px 12px; cursor: pointer; }
-    .meta { font-size: 12px; color: rgba(230,233,242,0.75); }
-    .title { font-weight: 600; }
-    .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid rgba(255,255,255,0.12); color: rgba(230,233,242,0.85); }
-    .ok { background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.22); }
-    .bad { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.22); }
-    .body { display: none; padding: 12px; border-top: 1px solid rgba(255,255,255,0.08); }
-    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; }
-    @media (min-width: 1000px) { .grid { grid-template-columns: 1fr 1fr 1fr; } }
-    pre { white-space: pre-wrap; word-break: break-word; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 10px; margin: 0; font-size: 12px; line-height: 1.4; }
-    .imgs { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
-    .imgs a { position: relative; display: inline-block; border: 1px solid rgba(255,255,255,0.10); border-radius: 10px; overflow: hidden; background: rgba(0,0,0,0.25); }
-    .imgs img { display: block; width: 140px; height: 140px; object-fit: contain; background: #000; }
-    .badge { position: absolute; top: 6px; left: 6px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: rgba(34,197,94,0.88); color: #081018; border: 1px solid rgba(34,197,94,0.18); }
-    .k { font-size: 12px; color: rgba(230,233,242,0.7); margin-bottom: 6px; }
-    .muted { color: rgba(230,233,242,0.55); }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Arial, sans-serif; background: #080e1f; color: #e2e8f0; line-height: 1.5; }
+
+    /* ── Header ── */
+    header { position: sticky; top: 0; z-index: 10; background: rgba(8,14,31,0.85); backdrop-filter: blur(12px); border-bottom: 1px solid rgba(255,255,255,0.07); padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+    header h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: 0.01em; flex: 1; }
+    .auto-refresh-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: rgba(226,232,240,0.6); cursor: pointer; user-select: none; }
+    .toggle { position: relative; width: 32px; height: 18px; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; inset: 0; background: rgba(255,255,255,0.12); border-radius: 999px; transition: background 0.2s; }
+    .slider::before { content: ""; position: absolute; width: 12px; height: 12px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform 0.2s; }
+    .toggle input:checked + .slider { background: #3b82f6; }
+    .toggle input:checked + .slider::before { transform: translateX(14px); }
+    .btn { background: rgba(255,255,255,0.07); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.10); padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; transition: background 0.15s; }
+    .btn:hover { background: rgba(255,255,255,0.13); }
+
+    /* ── Layout ── */
+    main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+
+    /* ── Stats Cards ── */
+    .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 20px; }
+    @media (max-width: 900px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 480px) { .stats { grid-template-columns: 1fr; } }
+    .stat-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07); border-radius: 14px; padding: 16px 18px; border-left: 3px solid var(--accent); position: relative; overflow: hidden; }
+    .stat-card::before { content: ""; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(255,255,255,0.02) 0%, transparent 60%); pointer-events: none; }
+    .stat-label { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: rgba(226,232,240,0.5); margin-bottom: 8px; }
+    .stat-value { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; color: #f1f5f9; line-height: 1; }
+    .stat-sub { font-size: 11px; color: rgba(226,232,240,0.45); margin-top: 5px; }
+    .c-blue  { --accent: #3b82f6; }
+    .c-green { --accent: #22c55e; }
+    .c-amber { --accent: #f59e0b; }
+    .c-red   { --accent: #ef4444; }
+    .c-purple{ --accent: #a855f7; }
+
+    /* ── Toolbar ── */
+    .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    .filter-tabs { display: flex; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; overflow: hidden; }
+    .filter-tab { padding: 5px 14px; font-size: 12px; cursor: pointer; color: rgba(226,232,240,0.6); border: none; background: none; transition: background 0.15s, color 0.15s; }
+    .filter-tab.active { background: rgba(255,255,255,0.10); color: #f1f5f9; font-weight: 600; }
+    .search { flex: 1; min-width: 160px; max-width: 280px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.09); border-radius: 8px; padding: 5px 12px; color: #e2e8f0; font-size: 13px; outline: none; }
+    .search:focus { border-color: rgba(59,130,246,0.5); }
+    .search::placeholder { color: rgba(226,232,240,0.35); }
+    .count-badge { margin-left: auto; font-size: 12px; color: rgba(226,232,240,0.45); }
+
+    /* ── Log List ── */
+    .log-item { border: 1px solid rgba(255,255,255,0.07); border-radius: 10px; background: rgba(255,255,255,0.02); margin-bottom: 6px; overflow: hidden; transition: border-color 0.15s; }
+    .log-item:hover { border-color: rgba(255,255,255,0.12); }
+    .log-row { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; }
+    .log-id { font-size: 11px; color: rgba(226,232,240,0.3); min-width: 36px; font-variant-numeric: tabular-nums; }
+    .log-model { flex: 1; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .log-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .log-dur { font-size: 12px; color: rgba(226,232,240,0.5); min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+    .log-time { font-size: 11px; color: rgba(226,232,240,0.35); min-width: 60px; text-align: right; }
+    .tag { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid transparent; }
+    .tag-ok  { background: rgba(34,197,94,0.10);  border-color: rgba(34,197,94,0.20);  color: #86efac; }
+    .tag-bad { background: rgba(239,68,68,0.10);  border-color: rgba(239,68,68,0.20);  color: #fca5a5; }
+    .tag-stream { background: rgba(59,130,246,0.08); border-color: rgba(59,130,246,0.15); color: #93c5fd; }
+    .tag-url    { background: rgba(168,85,247,0.08); border-color: rgba(168,85,247,0.15); color: #d8b4fe; }
+
+    /* ── Log Detail ── */
+    .log-detail { display: none; padding: 14px; border-top: 1px solid rgba(255,255,255,0.07); }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    @media (max-width: 760px) { .detail-grid { grid-template-columns: 1fr; } }
+    .detail-col-label { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(226,232,240,0.4); margin-bottom: 8px; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.30); border: 1px solid rgba(255,255,255,0.07); border-radius: 8px; padding: 10px; font-size: 11.5px; line-height: 1.5; color: #cbd5e1; max-height: 320px; overflow-y: auto; }
+    .imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+    .img-thumb { position: relative; border: 1px solid rgba(255,255,255,0.09); border-radius: 8px; overflow: hidden; background: rgba(0,0,0,0.3); }
+    .img-thumb img { display: block; width: 120px; height: 120px; object-fit: contain; }
+    .cache-badge { position: absolute; top: 4px; left: 4px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; background: rgba(34,197,94,0.85); color: #052e16; }
+
+    /* ── Empty / Status ── */
+    .empty { text-align: center; padding: 60px 0; color: rgba(226,232,240,0.3); font-size: 14px; }
+    .status-line { font-size: 12px; color: rgba(226,232,240,0.4); }
   </style>
 </head>
 <body>
-  <header>
-    <h1>banana-proxy 管理后台</h1>
-    <div class="sub">最近 100 次 Gemini 请求（raw / upstream / downstream），Base64 自动省略，URL 图片可直接预览。</div>
-  </header>
-  <main>
-    <div class="toolbar">
-      <button id="refresh">刷新</button>
-      <span class="meta muted" id="status"></span>
+<header>
+  <h1>banana-proxy 管理后台</h1>
+  <label class="auto-refresh-label">
+    <span class="toggle"><input type="checkbox" id="autoRefreshChk"><span class="slider"></span></span>
+    自动刷新
+  </label>
+  <button class="btn" id="btnRefresh">刷新</button>
+</header>
+<main>
+  <!-- Stats -->
+  <div class="stats" id="statsRow">
+    <div class="stat-card c-blue">  <div class="stat-label">总请求数</div><div class="stat-value" id="s-total">—</div><div class="stat-sub">自启动以来</div></div>
+    <div class="stat-card c-green"> <div class="stat-label">成功率</div><div class="stat-value" id="s-ok">—</div><div class="stat-sub" id="s-ok-sub">—</div></div>
+    <div class="stat-card c-amber"> <div class="stat-label">平均耗时</div><div class="stat-value" id="s-dur">—</div><div class="stat-sub">毫秒</div></div>
+    <div class="stat-card c-red">   <div class="stat-label">错误数</div><div class="stat-value" id="s-err">—</div><div class="stat-sub">4xx / 5xx</div></div>
+    <div class="stat-card c-purple"><div class="stat-label">缓存命中</div><div class="stat-value" id="s-cache">—</div><div class="stat-sub" id="s-cache-sub">—</div></div>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="filter-tabs">
+      <button class="filter-tab active" data-filter="all">全部</button>
+      <button class="filter-tab" data-filter="ok">成功 2xx</button>
+      <button class="filter-tab" data-filter="bad">失败 4xx+</button>
     </div>
-    <div id="list"></div>
-  </main>
-  <script>
-    const elList = document.getElementById('list');
-    const elStatus = document.getElementById('status');
-    const btnRefresh = document.getElementById('refresh');
+    <input class="search" id="searchBox" type="search" placeholder="搜索路径 / 模型名…" />
+    <span class="count-badge" id="countBadge"></span>
+    <span class="status-line" id="statusLine"></span>
+  </div>
 
-    function escapeHTML(s) {
-      return String(s)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;');
-    }
+  <!-- Log list -->
+  <div id="logList"></div>
+</main>
+<script>
+(function () {
+  'use strict';
 
-    function renderImgs(urls, hitUrls) {
-      if (!urls || urls.length === 0) return '';
-      const hit = new Set(hitUrls || []);
-      const items = urls.map(u => {
-        const safe = escapeHTML(u);
-        const badge = hit.has(u) ? '<span class=\"badge\">CACHE</span>' : '';
-        return '<a href=\"' + safe + '\" target=\"_blank\" rel=\"noreferrer\">' + badge + '<img src=\"' + safe + '\" alt=\"img\" /></a>';
-      }).join('');
-      return '<div class=\"imgs\">' + items + '</div>';
-    }
+  // ── State ──────────────────────────────────────────
+  let allItems = [];
+  let filterMode = 'all';   // 'all' | 'ok' | 'bad'
+  let searchText = '';
+  let autoTimer = null;
 
-    function pill(statusCode) {
-      const ok = (statusCode >= 200 && statusCode < 300);
-      const cls = ok ? 'ok' : 'bad';
-      return '<span class=\"pill ' + cls + '\">' + (statusCode || 0) + '</span>';
-    }
+  // ── DOM refs ───────────────────────────────────────
+  const elList    = document.getElementById('logList');
+  const elStatus  = document.getElementById('statusLine');
+  const elCount   = document.getElementById('countBadge');
+  const elSearch  = document.getElementById('searchBox');
+  const chkAuto   = document.getElementById('autoRefreshChk');
+  const btnRef    = document.getElementById('btnRefresh');
 
-    function card(item) {
-      const when = item.createdAt ? new Date(item.createdAt).toLocaleString() : '';
-      const path = item.query ? (item.path + '?' + item.query) : item.path;
-      const head =
-        '<div class=\"card-head\">' +
-          '<div>' +
-            '<div class=\"title\">' + escapeHTML(item.method || '') + ' ' + escapeHTML(path || '') + ' ' + pill(item.statusCode) + '</div>' +
-            '<div class=\"meta\">' + escapeHTML(when) + ' · output=' + escapeHTML(item.outputMode || '') + ' · stream=' + (item.isStream ? 'yes' : 'no') + ' · from=' + escapeHTML(item.remoteAddr || '') + '</div>' +
-          '</div>' +
-          '<div class=\"meta\">#' + escapeHTML(item.id || '') + '</div>' +
-        '</div>';
+  // ── Helpers ────────────────────────────────────────
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
 
-      const body =
-        '<div class=\"body\">' +
-          '<div class=\"grid\">' +
-            '<div>' +
-              '<div class=\"k\">请求体（raw）</div>' +
-              renderImgs(item.requestRawImages, item.requestRawImageCacheHits) +
-              '<pre>' + escapeHTML(item.requestRaw || '') + '</pre>' +
-            '</div>' +
-            '<div>' +
-              '<div class=\"k\">上游请求体（改写后）</div>' +
-              renderImgs(item.requestUpstreamImages) +
-              '<pre>' + escapeHTML(item.requestUpstream || '') + '</pre>' +
-            '</div>' +
-            '<div>' +
-              '<div class=\"k\">下游响应体（最终）</div>' +
-              renderImgs(item.responseImages) +
-              '<pre>' + escapeHTML(item.responseDownstream || '') + '</pre>' +
-            '</div>' +
-          '</div>' +
-        '</div>';
+  function fmtDur(ms) {
+    if (ms == null || ms <= 0) return '—';
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms/1000).toFixed(1) + 's';
+    const m = Math.floor(ms/60000), s = Math.round((ms%60000)/1000);
+    return m + 'm' + (s ? s + 's' : '');
+  }
 
-      const wrapper = document.createElement('div');
-      wrapper.className = 'card';
-      wrapper.innerHTML = head + body;
-      wrapper.querySelector('.card-head').addEventListener('click', () => {
-        const b = wrapper.querySelector('.body');
-        b.style.display = (b.style.display === 'block') ? 'none' : 'block';
-      });
-      return wrapper;
-    }
+  function fmtNum(n) {
+    return Number(n).toLocaleString('zh-CN');
+  }
 
-    async function refresh() {
-      elStatus.textContent = '加载中...';
+  function relTime(iso) {
+    const diff = Date.now() - new Date(iso).getTime();
+    const s = Math.round(diff/1000);
+    if (s < 5)  return '刚刚';
+    if (s < 60) return s + '秒前';
+    const m = Math.round(s/60);
+    if (m < 60) return m + '分钟前';
+    const h = Math.round(m/60);
+    if (h < 24) return h + '小时前';
+    return Math.round(h/24) + '天前';
+  }
+
+  function extractModel(path) {
+    const m = path && path.match(/models\/([^/:]+)/);
+    return m ? m[1] : (path || '');
+  }
+
+  // ── Stats ──────────────────────────────────────────
+  async function loadStats() {
+    try {
+      const r = await fetch('/admin/api/stats', { cache: 'no-store' });
+      if (!r.ok) return;
+      const d = await r.json();
+      const total = d.totalRequests || 0;
+      const errors = d.errorRequests || 0;
+      const ok = total - errors;
+      const okPct = total ? ((ok/total)*100).toFixed(1)+'%' : '—';
+      const avgMs = total ? Math.round(d.totalDurationMs/total) : 0;
+      const hits  = d.cacheHits || 0;
+      const hitPct = total ? ((hits/total)*100).toFixed(1)+'%' : '—';
+
+      document.getElementById('s-total').textContent  = fmtNum(total);
+      document.getElementById('s-ok').textContent     = okPct;
+      document.getElementById('s-ok-sub').textContent = fmtNum(ok) + ' 次成功';
+      document.getElementById('s-dur').textContent    = total ? fmtNum(avgMs) : '—';
+      document.getElementById('s-err').textContent    = fmtNum(errors);
+      document.getElementById('s-cache').textContent  = hitPct;
+      document.getElementById('s-cache-sub').textContent = fmtNum(hits) + ' 次命中';
+    } catch (_) {}
+  }
+
+  // ── Logs ───────────────────────────────────────────
+  function renderImgs(urls, hits) {
+    if (!urls || !urls.length) return '';
+    const hitSet = new Set(hits || []);
+    return '<div class="imgs">' + urls.map(u => {
+      const badge = hitSet.has(u) ? '<span class="cache-badge">CACHE</span>' : '';
+      return '<a class="img-thumb" href="'+esc(u)+'" target="_blank" rel="noreferrer">'
+           + badge + '<img src="'+esc(u)+'" alt="" loading="lazy"></a>';
+    }).join('') + '</div>';
+  }
+
+  function buildRow(item) {
+    const model  = extractModel(item.path);
+    const isOk   = item.statusCode >= 200 && item.statusCode < 400;
+    const tagStatus = isOk
+      ? '<span class="tag tag-ok">'+esc(item.statusCode)+'</span>'
+      : '<span class="tag tag-bad">'+esc(item.statusCode)+'</span>';
+    const tagStream = item.isStream ? '<span class="tag tag-stream">stream</span>' : '';
+    const tagOut = item.outputMode ? '<span class="tag tag-url">'+esc(item.outputMode)+'</span>' : '';
+
+    const absTime = item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN') : '';
+    const rel = item.createdAt ? relTime(item.createdAt) : '';
+
+    const row = '<div class="log-row">'
+      + '<span class="log-id">#'+esc(item.id)+'</span>'
+      + '<span class="log-model" title="'+esc(item.path)+'">'+esc(model)+'</span>'
+      + '<span class="log-meta">'
+      + tagStatus + tagStream + tagOut
+      + '<span class="log-dur">'+fmtDur(item.durationMs)+'</span>'
+      + '<span class="log-time" title="'+esc(absTime)+'">'+esc(rel)+'</span>'
+      + '</span>'
+      + '</div>';
+
+    const detail = '<div class="log-detail">'
+      + '<div class="detail-grid">'
+      + '<div>'
+        + '<div class="detail-col-label">原始请求体</div>'
+        + renderImgs(item.requestRawImages, item.requestRawImageCacheHits)
+        + '<pre>'+esc(item.requestRaw || '')+'</pre>'
+      + '</div>'
+      + '<div>'
+        + '<div class="detail-col-label">下游响应体</div>'
+        + renderImgs(item.responseImages)
+        + '<pre>'+esc(item.responseDownstream || '')+'</pre>'
+      + '</div>'
+      + '</div>'
+      + '</div>';
+
+    const el = document.createElement('div');
+    el.className = 'log-item';
+    el.dataset.status = isOk ? 'ok' : 'bad';
+    el.dataset.search = (model + ' ' + item.path + ' ' + item.statusCode).toLowerCase();
+    el.innerHTML = row + detail;
+    el.querySelector('.log-row').addEventListener('click', () => {
+      const d = el.querySelector('.log-detail');
+      d.style.display = d.style.display === 'block' ? 'none' : 'block';
+    });
+    return el;
+  }
+
+  function applyFilter() {
+    const q = searchText.toLowerCase();
+    let shown = 0;
+    const items = elList.querySelectorAll('.log-item');
+    items.forEach(el => {
+      const matchFilter = filterMode === 'all'
+        || (filterMode === 'ok'  && el.dataset.status === 'ok')
+        || (filterMode === 'bad' && el.dataset.status === 'bad');
+      const matchSearch = !q || el.dataset.search.includes(q);
+      const visible = matchFilter && matchSearch;
+      el.style.display = visible ? '' : 'none';
+      if (visible) shown++;
+    });
+    elCount.textContent = shown === allItems.length
+      ? '共 ' + allItems.length + ' 条'
+      : '显示 ' + shown + ' / ' + allItems.length + ' 条';
+  }
+
+  async function loadLogs() {
+    elStatus.textContent = '加载中…';
+    try {
+      const r = await fetch('/admin/api/logs', { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json();
+      allItems = (d && d.items) || [];
       elList.innerHTML = '';
-      try {
-        const res = await fetch('/admin/api/logs', { cache: 'no-store' });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        const items = (data && data.items) ? data.items : [];
-        elStatus.textContent = '共 ' + items.length + ' 条';
-        for (const it of items) elList.appendChild(card(it));
-      } catch (e) {
-        elStatus.textContent = '加载失败：' + e.message;
+      if (!allItems.length) {
+        elList.innerHTML = '<div class="empty">暂无请求记录</div>';
+      } else {
+        const frag = document.createDocumentFragment();
+        allItems.forEach(it => frag.appendChild(buildRow(it)));
+        elList.appendChild(frag);
       }
+      applyFilter();
+      elStatus.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
+    } catch (e) {
+      elStatus.textContent = '加载失败：' + e.message;
     }
+  }
 
-    btnRefresh.addEventListener('click', refresh);
-    refresh();
-  </script>
+  async function refresh() {
+    await Promise.all([loadStats(), loadLogs()]);
+  }
+
+  // ── Auto-refresh ───────────────────────────────────
+  chkAuto.addEventListener('change', () => {
+    if (chkAuto.checked) {
+      autoTimer = setInterval(refresh, 5000);
+    } else {
+      clearInterval(autoTimer);
+      autoTimer = null;
+    }
+  });
+
+  // ── Filter tabs ────────────────────────────────────
+  document.querySelectorAll('.filter-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      filterMode = btn.dataset.filter;
+      applyFilter();
+    });
+  });
+
+  // ── Search ─────────────────────────────────────────
+  elSearch.addEventListener('input', () => {
+    searchText = elSearch.value;
+    applyFilter();
+  });
+
+  // ── Init ───────────────────────────────────────────
+  btnRef.addEventListener('click', refresh);
+  refresh();
+})();
+</script>
 </body>
 </html>`
