@@ -941,6 +941,7 @@ func (app *App) handleNonStreamResponse(w http.ResponseWriter, resp *http.Respon
 	writeDur := time.Since(writeStart)
 	if adminEntry != nil {
 		adminEntry.ResponseDownstream, adminEntry.ResponseImages = sanitizeJSONForAdminLog(finalBytes)
+		adminEntry.FinishReason = extractFinishReasonFromMap(jsonBody)
 	}
 
 	total := time.Since(start)
@@ -1047,7 +1048,28 @@ func (app *App) handleStreamResponse(w http.ResponseWriter, resp *http.Response,
 	}
 	if adminEntry != nil {
 		adminEntry.ResponseDownstream, adminEntry.ResponseImages = sanitizeJSONForAdminLog(lastDataJSON)
+		if len(lastDataJSON) > 0 {
+			var lastBody map[string]interface{}
+			if err := json.Unmarshal(lastDataJSON, &lastBody); err == nil {
+				adminEntry.FinishReason = extractFinishReasonFromMap(lastBody)
+			}
+		}
 	}
+}
+
+// extractFinishReasonFromMap returns the finishReason of the first candidate
+// in a parsed Gemini API response body, or "" if absent.
+func extractFinishReasonFromMap(body map[string]interface{}) string {
+	candidates, ok := body["candidates"].([]interface{})
+	if !ok || len(candidates) == 0 {
+		return ""
+	}
+	cand, ok := candidates[0].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	reason, _ := cand["finishReason"].(string)
+	return reason
 }
 
 // --- Image Processing Logic ---

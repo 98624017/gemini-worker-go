@@ -24,8 +24,9 @@ type adminLogEntry struct {
 	RemoteAddr string    `json:"remoteAddr"`
 	IsStream   bool      `json:"isStream"`
 	OutputMode string    `json:"outputMode"`
-	StatusCode int       `json:"statusCode"`
-	DurationMs int64    `json:"durationMs"`
+	StatusCode   int    `json:"statusCode"`
+	DurationMs   int64  `json:"durationMs"`
+	FinishReason string `json:"finishReason"`
 
 	RequestRaw               string   `json:"requestRaw"`
 	RequestRawImages         []string `json:"requestRawImages"`
@@ -437,6 +438,14 @@ const adminLogsHTML = `<!doctype html>
     .img-thumb img { display: block; width: 120px; height: 120px; object-fit: contain; }
     .cache-badge { position: absolute; top: 4px; left: 4px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; background: rgba(34,197,94,0.85); color: #052e16; }
 
+    /* ── FinishReason Bar ── */
+    .fr-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; min-height: 0; }
+    .fr-label { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: rgba(226,232,240,0.35); margin-right: 2px; }
+    .fr-btn { padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 999px; border: 1px solid rgba(255,255,255,0.09); background: rgba(255,255,255,0.04); color: rgba(226,232,240,0.55); cursor: pointer; transition: background 0.15s, color 0.15s; }
+    .fr-btn.active { background: rgba(99,102,241,0.15); border-color: rgba(99,102,241,0.35); color: #a5b4fc; }
+    .fr-btn:hover { background: rgba(255,255,255,0.09); color: #e2e8f0; }
+    .tag-fr { background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.18); color: #a5b4fc; }
+
     /* ── Empty / Status ── */
     .empty { text-align: center; padding: 60px 0; color: rgba(226,232,240,0.3); font-size: 14px; }
     .status-line { font-size: 12px; color: rgba(226,232,240,0.4); }
@@ -473,6 +482,9 @@ const adminLogsHTML = `<!doctype html>
     <span class="status-line" id="statusLine"></span>
   </div>
 
+  <!-- FinishReason filter bar (populated dynamically) -->
+  <div id="frBar" class="fr-bar"></div>
+
   <!-- Log list -->
   <div id="logList"></div>
 </main>
@@ -482,7 +494,8 @@ const adminLogsHTML = `<!doctype html>
 
   // ── State ──────────────────────────────────────────
   let allItems = [];
-  let filterMode = 'all';   // 'all' | 'ok' | 'bad'
+  let filterMode = 'all';         // 'all' | 'ok' | 'bad'
+  let finishReasonFilter = 'all'; // 'all' | <REASON_STRING>
   let searchText = '';
   let autoTimer = null;
 
@@ -587,6 +600,8 @@ const adminLogsHTML = `<!doctype html>
       : '<span class="tag tag-bad">'+esc(item.statusCode)+'</span>';
     const tagStream = item.isStream ? '<span class="tag tag-stream">stream</span>' : '';
     const tagOut = item.outputMode ? '<span class="tag tag-url">'+esc(item.outputMode)+'</span>' : '';
+    const fr = (item.finishReason || '').toUpperCase();
+    const tagFr = fr ? '<span class="tag tag-fr">'+esc(fr)+'</span>' : '';
 
     const absTime = item.createdAt ? new Date(item.createdAt).toLocaleString('zh-CN') : '';
     const rel = item.createdAt ? relTime(item.createdAt) : '';
@@ -595,7 +610,7 @@ const adminLogsHTML = `<!doctype html>
       + '<span class="log-id">#'+esc(item.id)+'</span>'
       + '<span class="log-model" title="'+esc(item.path)+'">'+esc(model)+'</span>'
       + '<span class="log-meta">'
-      + tagStatus + tagStream + tagOut
+      + tagStatus + tagStream + tagOut + tagFr
       + '<span class="log-dur">'+fmtDur(item.durationMs)+'</span>'
       + '<span class="log-time" title="'+esc(absTime)+'">'+esc(rel)+'</span>'
       + '</span>'
@@ -619,7 +634,8 @@ const adminLogsHTML = `<!doctype html>
     const el = document.createElement('div');
     el.className = 'log-item';
     el.dataset.status = isOk ? 'ok' : 'bad';
-    el.dataset.search = (model + ' ' + item.path + ' ' + item.statusCode).toLowerCase();
+    el.dataset.fr = fr;
+    el.dataset.search = (model + ' ' + item.path + ' ' + item.statusCode + ' ' + fr).toLowerCase();
     el.innerHTML = row + detail;
     el.querySelector('.log-row').addEventListener('click', () => {
       const d = el.querySelector('.log-detail');
@@ -636,14 +652,44 @@ const adminLogsHTML = `<!doctype html>
       const matchFilter = filterMode === 'all'
         || (filterMode === 'ok'  && el.dataset.status === 'ok')
         || (filterMode === 'bad' && el.dataset.status === 'bad');
+      const matchFr = finishReasonFilter === 'all' || el.dataset.fr === finishReasonFilter;
       const matchSearch = !q || el.dataset.search.includes(q);
-      const visible = matchFilter && matchSearch;
+      const visible = matchFilter && matchFr && matchSearch;
       el.style.display = visible ? '' : 'none';
       if (visible) shown++;
     });
     elCount.textContent = shown === allItems.length
       ? '共 ' + allItems.length + ' 条'
       : '显示 ' + shown + ' / ' + allItems.length + ' 条';
+  }
+
+  // ── FinishReason Bar ───────────────────────────────
+  function rebuildFrBar() {
+    const frBar = document.getElementById('frBar');
+    const counts = {};
+    allItems.forEach(it => {
+      const fr = (it.finishReason || '').toUpperCase();
+      if (fr) counts[fr] = (counts[fr] || 0) + 1;
+    });
+    const keys = Object.keys(counts).sort();
+    if (!keys.length) { frBar.innerHTML = ''; return; }
+
+    let html = '<span class="fr-label">finishReason</span>';
+    const allAct = finishReasonFilter === 'all' ? ' active' : '';
+    html += '<button class="fr-btn'+allAct+'" data-reason="all">全部</button>';
+    keys.forEach(k => {
+      const act = finishReasonFilter === k ? ' active' : '';
+      html += '<button class="fr-btn'+act+'" data-reason="'+esc(k)+'">'+esc(k)+' <span style="opacity:.6">('+counts[k]+')</span></button>';
+    });
+    frBar.innerHTML = html;
+    frBar.querySelectorAll('.fr-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        finishReasonFilter = btn.dataset.reason;
+        frBar.querySelectorAll('.fr-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        applyFilter();
+      });
+    });
   }
 
   async function loadLogs() {
@@ -661,6 +707,7 @@ const adminLogsHTML = `<!doctype html>
         allItems.forEach(it => frag.appendChild(buildRow(it)));
         elList.appendChild(frag);
       }
+      rebuildFrBar();
       applyFilter();
       elStatus.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN');
     } catch (e) {
