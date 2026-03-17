@@ -47,6 +47,7 @@ var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 // marshalJSON marshals v to JSON using a pooled buffer. The returned slice is a
 // fresh copy and is safe to use after marshalJSON returns.
+// On error, the returned slice is nil.
 func marshalJSON(v any) ([]byte, error) {
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -737,7 +738,11 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 	inlineDataDur := time.Since(inlineDataStart)
 
 	// 5. Build Upstream Request
-	newBodyBytes, _ := marshalJSON(bodyMap)
+	newBodyBytes, marshalErr := marshalJSON(bodyMap)
+	if marshalErr != nil {
+		log.Printf("[marshalJSON] failed to marshal upstream body: %v", marshalErr)
+		newBodyBytes = bodyBytes // fallback: forward original body unchanged
+	}
 	if adminEntry != nil {
 		adminEntry.RequestUpstream, adminEntry.RequestUpstreamImgs = sanitizeJSONForAdminLog(newBodyBytes)
 	}
@@ -868,7 +873,10 @@ func (app *App) handleNonStreamResponse(w http.ResponseWriter, resp *http.Respon
 	convertDur := time.Since(convertStart)
 
 	marshalStart := time.Now()
-	finalBytes, _ := marshalJSON(jsonBody)
+	finalBytes, marshalErr := marshalJSON(jsonBody)
+	if marshalErr != nil {
+		log.Printf("[marshalJSON] failed to marshal response body: %v", marshalErr)
+	}
 	marshalDur := time.Since(marshalStart)
 
 	writeStart := time.Now()
@@ -947,7 +955,10 @@ func (app *App) handleStreamResponse(w http.ResponseWriter, resp *http.Response,
 					"status":  "ERROR",
 				},
 			}
-			newBytes, _ := marshalJSON(errObj)
+			newBytes, marshalErr := marshalJSON(errObj)
+			if marshalErr != nil {
+				log.Printf("[marshalJSON] failed to marshal SSE error: %v", marshalErr)
+			}
 			fmt.Fprintf(w, "data: %s\n", string(newBytes))
 			w.(http.Flusher).Flush()
 			if adminEntry != nil {
@@ -964,7 +975,10 @@ func (app *App) handleStreamResponse(w http.ResponseWriter, resp *http.Response,
 			}
 		}
 
-		newBytes, _ := marshalJSON(jsonBody)
+		newBytes, marshalErr := marshalJSON(jsonBody)
+		if marshalErr != nil {
+			log.Printf("[marshalJSON] failed to marshal SSE chunk: %v", marshalErr)
+		}
 		if adminEntry != nil {
 			lastDataJSON = newBytes
 		}
@@ -2021,7 +2035,10 @@ func geminiError(w http.ResponseWriter, code int, msg string) []byte {
 			"status":  "ERROR",
 		},
 	}
-	b, _ := marshalJSON(payload)
+	b, marshalErr := marshalJSON(payload)
+	if marshalErr != nil {
+		log.Printf("[marshalJSON] failed to marshal error payload: %v", marshalErr)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	if len(b) > 0 {
