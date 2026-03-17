@@ -231,7 +231,7 @@ ALLOWED_PROXY_DOMAINS="ai.kefan.cn,uguu.se,.uguu.se,.aitohumanize.com,.xuancat.c
 - 单条记录超过上限时自动忽略（不写入内存缓存）
 - 进程重启后冷启动；磁盘缓存作为 L2 warmup 来源
 
-注意：内存缓存与磁盘缓存**互相独立**，磁盘缓存 `INLINE_DATA_URL_CACHE_DIR` 为空时内存缓存仍可单独启用（仅在进程生命周期内有效，无持久化）。
+注意：内存缓存作为磁盘缓存的 **L1 前置层**，需要磁盘缓存（`INLINE_DATA_URL_CACHE_DIR`）同时配置才能生效。若磁盘缓存未配置，内存缓存设置将被忽略。
 
 #### `IMAGE_TLS_HANDSHAKE_TIMEOUT_MS`（默认 `15000`）
 

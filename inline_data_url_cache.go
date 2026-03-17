@@ -231,12 +231,8 @@ func (c *inlineDataURLDiskCache) GetOrFetch(url string, fetch func() (string, []
 			return inflightResult{}, err
 		}
 
-		// Write L2 disk cache (best-effort).
+		// Write L2 disk cache (best-effort). L1 is written inside Set.
 		_ = c.Set(url, mime, bytesData)
-		// Write L1 memory cache.
-		if c.memCache != nil {
-			c.memCache.Set(url, mime, bytesData)
-		}
 		return inflightResult{mime: mime, bytesData: bytesData, fromCache: false}, nil
 	})
 	if err != nil {

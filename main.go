@@ -503,11 +503,11 @@ func main() {
 	}
 	if cfg.InlineDataURLCacheDir != "" && cfg.InlineDataURLCacheTTL > 0 && cfg.InlineDataURLCacheMaxBytes > 0 {
 		log.Printf("InlineData URL Cache: disk L2 enabled dir=%s ttl=%v maxBytes=%d", cfg.InlineDataURLCacheDir, cfg.InlineDataURLCacheTTL, cfg.InlineDataURLCacheMaxBytes)
+		if cfg.InlineDataURLMemCacheMaxBytes > 0 {
+			log.Printf("InlineData URL Cache: memory L1 enabled maxBytes=%d", cfg.InlineDataURLMemCacheMaxBytes)
+		}
 	} else {
 		log.Printf("InlineData URL Cache: disabled")
-	}
-	if cfg.InlineDataURLMemCacheMaxBytes > 0 {
-		log.Printf("InlineData URL Cache: memory L1 enabled maxBytes=%d", cfg.InlineDataURLMemCacheMaxBytes)
 	}
 	if app.InlineDataURLBackgroundFetcher != nil {
 		log.Printf(
