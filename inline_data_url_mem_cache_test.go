@@ -101,3 +101,32 @@ func TestMemCache_ConcurrentReadWrite(t *testing.T) {
 		<-done
 	}
 }
+
+func TestMemCache_UpdateLargerEvictsOthers(t *testing.T) {
+	// maxBytes = 20; insert A(10) + B(10) = full.
+	// Then update A to 15 bytes: curBytes would become 25 > 20, so B must be evicted.
+	m := newInlineDataURLMemCache(20)
+	m.Set("https://example.com/a.jpg", "image/jpeg", []byte("aaaaaaaaaa")) // 10 bytes
+	m.Set("https://example.com/b.jpg", "image/jpeg", []byte("bbbbbbbbbb")) // 10 bytes — full
+
+	// Update A with larger data (15 bytes); eviction loop should remove B to stay within limit.
+	m.Set("https://example.com/a.jpg", "image/jpeg", []byte("aaaaaaaaaaaaaaa")) // 15 bytes
+
+	_, _, okA := m.Get("https://example.com/a.jpg")
+	_, _, okB := m.Get("https://example.com/b.jpg")
+
+	if !okA {
+		t.Fatal("expected 'a' (updated) to remain in cache")
+	}
+	if okB {
+		t.Fatal("expected 'b' to be evicted after 'a' was updated to a larger size")
+	}
+
+	m.mu.Lock()
+	cur := m.curBytes
+	max := m.maxBytes
+	m.mu.Unlock()
+	if cur > max {
+		t.Fatalf("curBytes=%d exceeded maxBytes=%d after update", cur, max)
+	}
+}

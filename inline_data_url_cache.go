@@ -103,7 +103,9 @@ func (m *inlineDataURLMemCache) Set(url, mime string, data []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Update existing entry.
+	// Update existing entry. After adjusting curBytes, run the same eviction
+	// loop as the insert path to ensure curBytes stays within maxBytes when
+	// the new data is larger than the old data.
 	if e, ok := m.items[url]; ok {
 		m.curBytes -= e.size
 		e.mime = mime
@@ -111,6 +113,19 @@ func (m *inlineDataURLMemCache) Set(url, mime string, data []byte) {
 		e.size = size
 		m.curBytes += size
 		m.lru.MoveToFront(e.elem)
+		// Evict other (non-current) LRU entries if the update caused an overflow.
+		for m.curBytes > m.maxBytes && m.lru.Len() > 1 {
+			back := m.lru.Back()
+			if back == nil || back == e.elem {
+				break
+			}
+			key := back.Value.(string)
+			if victim, ok := m.items[key]; ok {
+				m.curBytes -= victim.size
+				delete(m.items, key)
+			}
+			m.lru.Remove(back)
+		}
 		return
 	}
 
