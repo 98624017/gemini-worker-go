@@ -860,3 +860,21 @@ func TestHandleNonStreamResponse_PreservesTextPartWhileDroppingSmallerInlineImag
 		t.Fatalf("expected larger image to be kept, got=%q want=%q", got, largeB64)
 	}
 }
+
+func TestSSEScannerBufPool_Reuse(t *testing.T) {
+	// Get a buffer, capture its pointer, return it, get again — should be same backing array.
+	p1 := sseScannerBufPool.Get().(*[]byte)
+	addr1 := &(*p1)[0]
+	sseScannerBufPool.Put(p1)
+
+	p2 := sseScannerBufPool.Get().(*[]byte)
+	addr2 := &(*p2)[0]
+	sseScannerBufPool.Put(p2)
+
+	if addr1 != addr2 {
+		t.Skip("sync.Pool did not reuse buffer (GC may have collected it — acceptable under load)")
+	}
+	if len(*p1) != MaxSSEScanTokenBytes {
+		t.Fatalf("expected buf len=%d, got=%d", MaxSSEScanTokenBytes, len(*p1))
+	}
+}

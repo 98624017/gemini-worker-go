@@ -49,6 +49,14 @@ var proxyPrewarmSem = make(chan struct{}, MaxConcurrentInlineDataFetches)
 // bufPool recycles bytes.Buffer across JSON marshal calls to reduce GC pressure.
 var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
+// sseScannerBufPool recycles the large scanner buffer used per SSE response (~17 MiB each).
+var sseScannerBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, MaxSSEScanTokenBytes)
+		return &b
+	},
+}
+
 // marshalJSON marshals v to JSON using a pooled buffer. The returned slice is a
 // fresh copy and is safe to use after marshalJSON returns.
 // On error, the returned slice is nil.
@@ -921,8 +929,10 @@ func (app *App) handleStreamResponse(w http.ResponseWriter, resp *http.Response,
 	}
 
 	var lastDataJSON []byte
+	sseBufPtr := sseScannerBufPool.Get().(*[]byte)
+	defer sseScannerBufPool.Put(sseBufPtr)
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), MaxSSEScanTokenBytes)
+	scanner.Buffer(*sseBufPtr, MaxSSEScanTokenBytes)
 	for scanner.Scan() {
 		line := scanner.Text()
 
