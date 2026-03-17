@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -20,6 +21,7 @@ type inlineDataURLDiskCache struct {
 
 	mu       sync.Mutex
 	inflight inflightGroup
+	memCache *inlineDataURLMemCache // optional L1; nil = disabled
 }
 
 type inlineDataURLDiskCacheMeta struct {
@@ -43,6 +45,92 @@ type inflightResult struct {
 	mime      string
 	bytesData []byte
 	fromCache bool
+}
+
+// inlineDataURLMemCache is an in-process LRU cache (L1) that sits in front of
+// the disk cache (L2) to eliminate disk I/O for hot-path repeated URL fetches.
+type inlineDataURLMemEntry struct {
+	mime string
+	data []byte
+	size int64
+	elem *list.Element // back-pointer into lru list; Value = URL string (cache key)
+}
+
+type inlineDataURLMemCache struct {
+	mu       sync.RWMutex
+	items    map[string]*inlineDataURLMemEntry
+	lru      *list.List // front = MRU, back = LRU
+	maxBytes int64
+	curBytes int64
+}
+
+func newInlineDataURLMemCache(maxBytes int64) *inlineDataURLMemCache {
+	if maxBytes <= 0 {
+		return nil
+	}
+	return &inlineDataURLMemCache{
+		items:    make(map[string]*inlineDataURLMemEntry),
+		lru:      list.New(),
+		maxBytes: maxBytes,
+	}
+}
+
+// Get returns a cached entry and moves it to MRU position. Requires a write lock for MoveToFront.
+func (m *inlineDataURLMemCache) Get(url string) (mime string, data []byte, ok bool) {
+	if m == nil {
+		return "", nil, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.items[url]
+	if !ok {
+		return "", nil, false
+	}
+	m.lru.MoveToFront(e.elem)
+	return e.mime, e.data, true
+}
+
+// Set inserts or updates an entry. Items larger than maxBytes are silently ignored.
+func (m *inlineDataURLMemCache) Set(url, mime string, data []byte) {
+	if m == nil {
+		return
+	}
+	size := int64(len(data))
+	if size > m.maxBytes {
+		return // single item exceeds total capacity; skip
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Update existing entry.
+	if e, ok := m.items[url]; ok {
+		m.curBytes -= e.size
+		e.mime = mime
+		e.data = data
+		e.size = size
+		m.curBytes += size
+		m.lru.MoveToFront(e.elem)
+		return
+	}
+
+	// Evict LRU entries until there is room for the new entry.
+	for m.curBytes+size > m.maxBytes && m.lru.Len() > 0 {
+		back := m.lru.Back()
+		if back == nil {
+			break
+		}
+		key := back.Value.(string)
+		if victim, ok := m.items[key]; ok {
+			m.curBytes -= victim.size
+			delete(m.items, key)
+		}
+		m.lru.Remove(back)
+	}
+
+	elem := m.lru.PushFront(url)
+	m.items[url] = &inlineDataURLMemEntry{mime: mime, data: data, size: size, elem: elem}
+	m.curBytes += size
 }
 
 func (g *inflightGroup) Do(key string, fn func() (inflightResult, error)) (inflightResult, error) {
@@ -107,12 +195,34 @@ func (c *inlineDataURLDiskCache) GetOrFetch(url string, fetch func() (string, []
 		return mime, bytesData, false, err
 	}
 
+	// L1: memory cache check (no disk I/O).
+	if c.memCache != nil {
+		if m, d, ok := c.memCache.Get(url); ok {
+			return m, d, true, nil
+		}
+	}
+
+	// L2: disk cache check.
 	if mime, bytesData, ok, err := c.Get(url); err == nil && ok {
+		// Promote to L1 for subsequent requests.
+		if c.memCache != nil {
+			c.memCache.Set(url, mime, bytesData)
+		}
 		return mime, bytesData, true, nil
 	}
 
 	res, err := c.inflight.Do(url, func() (inflightResult, error) {
+		// Double-check L1 (another goroutine may have populated while we waited).
+		if c.memCache != nil {
+			if m, d, ok := c.memCache.Get(url); ok {
+				return inflightResult{mime: m, bytesData: d, fromCache: true}, nil
+			}
+		}
+		// Double-check L2 disk.
 		if mime, bytesData, ok, err := c.Get(url); err == nil && ok {
+			if c.memCache != nil {
+				c.memCache.Set(url, mime, bytesData)
+			}
 			return inflightResult{mime: mime, bytesData: bytesData, fromCache: true}, nil
 		}
 
@@ -121,8 +231,12 @@ func (c *inlineDataURLDiskCache) GetOrFetch(url string, fetch func() (string, []
 			return inflightResult{}, err
 		}
 
-		// Cache is best-effort; do not fail the request if cache write fails.
+		// Write L2 disk cache (best-effort).
 		_ = c.Set(url, mime, bytesData)
+		// Write L1 memory cache.
+		if c.memCache != nil {
+			c.memCache.Set(url, mime, bytesData)
+		}
 		return inflightResult{mime: mime, bytesData: bytesData, fromCache: false}, nil
 	})
 	if err != nil {
@@ -294,6 +408,11 @@ func (c *inlineDataURLDiskCache) Set(url string, mime string, bytesData []byte) 
 		_ = os.Remove(tmpMetaPath)
 		_ = os.Remove(dataPath)
 		return err
+	}
+
+	// Also populate L1 memory cache so background-fetch onSuccess hits L1 too.
+	if c.memCache != nil {
+		c.memCache.Set(url, mime, bytesData)
 	}
 
 	return c.pruneLocked()

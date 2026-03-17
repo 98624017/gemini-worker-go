@@ -106,6 +106,10 @@ type Config struct {
 	InlineDataURLCacheTTL      time.Duration
 	InlineDataURLCacheMaxBytes int64
 
+	// Optional L1 in-memory LRU cache in front of the disk cache.
+	// Zero or negative disables the memory cache.
+	InlineDataURLMemCacheMaxBytes int64
+
 	// Optional background fetch bridge for slow inlineData URL downloads.
 	// Each request waits InlineDataURLBackgroundFetchWaitTimeout; on timeout, the
 	// same download keeps running in background until InlineDataURLBackgroundFetchTotalTimeout.
@@ -308,6 +312,20 @@ func loadConfig() Config {
 		}
 	}
 
+	// L1 memory cache for inlineData URL fetches (default 100MiB).
+	cfg.InlineDataURLMemCacheMaxBytes = 100 * 1024 * 1024 // 100MiB default
+	if raw := strings.TrimSpace(os.Getenv("INLINE_DATA_URL_MEMORY_CACHE_MAX_BYTES")); raw != "" {
+		if isDisabledValue(raw) {
+			cfg.InlineDataURLMemCacheMaxBytes = 0
+		} else if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			if v <= 0 {
+				cfg.InlineDataURLMemCacheMaxBytes = 0
+			} else {
+				cfg.InlineDataURLMemCacheMaxBytes = v
+			}
+		}
+	}
+
 	// Background fetch bridge for slow inlineData URL downloads.
 	cfg.InlineDataURLBackgroundFetchWaitTimeout = cfg.ImageFetchTimeout
 	if raw := strings.TrimSpace(os.Getenv("INLINE_DATA_URL_BACKGROUND_FETCH_WAIT_TIMEOUT_MS")); raw != "" {
@@ -424,6 +442,9 @@ func main() {
 		if err != nil {
 			log.Printf("WARNING: InlineData URL cache disabled: %v", err)
 		} else {
+			if cfg.InlineDataURLMemCacheMaxBytes > 0 {
+				cache.memCache = newInlineDataURLMemCache(cfg.InlineDataURLMemCacheMaxBytes)
+			}
 			app.InlineDataURLCache = cache
 		}
 	}
@@ -481,9 +502,12 @@ func main() {
 		log.Printf("WARNING: UPLOAD_INSECURE_SKIP_VERIFY is enabled. Upload TLS certificate verification is disabled.")
 	}
 	if cfg.InlineDataURLCacheDir != "" && cfg.InlineDataURLCacheTTL > 0 && cfg.InlineDataURLCacheMaxBytes > 0 {
-		log.Printf("InlineData URL Cache: enabled dir=%s ttl=%v maxBytes=%d", cfg.InlineDataURLCacheDir, cfg.InlineDataURLCacheTTL, cfg.InlineDataURLCacheMaxBytes)
+		log.Printf("InlineData URL Cache: disk L2 enabled dir=%s ttl=%v maxBytes=%d", cfg.InlineDataURLCacheDir, cfg.InlineDataURLCacheTTL, cfg.InlineDataURLCacheMaxBytes)
 	} else {
 		log.Printf("InlineData URL Cache: disabled")
+	}
+	if cfg.InlineDataURLMemCacheMaxBytes > 0 {
+		log.Printf("InlineData URL Cache: memory L1 enabled maxBytes=%d", cfg.InlineDataURLMemCacheMaxBytes)
 	}
 	if app.InlineDataURLBackgroundFetcher != nil {
 		log.Printf(

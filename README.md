@@ -220,7 +220,18 @@ ALLOWED_PROXY_DOMAINS="ai.kefan.cn,uguu.se,.uguu.se,.aitohumanize.com,.xuancat.c
 
 #### `INLINE_DATA_URL_CACHE_MAX_BYTES`（默认 `1073741824`）
 
-缓存目录允许占用的最大字节数（默认 1GiB）。超过后会按“近似 LRU（按文件 mtime）”淘汰旧条目。
+缓存目录允许占用的最大字节数（默认 1GiB）。超过后会按”近似 LRU（按文件 mtime）”淘汰旧条目。
+
+#### `INLINE_DATA_URL_MEMORY_CACHE_MAX_BYTES`（默认 `104857600`，即 100MiB）
+
+请求侧 inlineData URL 的**内存 L1 缓存**容量上限（字节）。
+
+该缓存位于磁盘缓存之前：内存命中时直接返回，完全避免磁盘 I/O（通常可节省 1–5ms）。
+- `0` / `off` / `false`：关闭内存缓存（磁盘 L2 仍正常工作）
+- 单条记录超过上限时自动忽略（不写入内存缓存）
+- 进程重启后冷启动；磁盘缓存作为 L2 warmup 来源
+
+注意：内存缓存与磁盘缓存**互相独立**，磁盘缓存 `INLINE_DATA_URL_CACHE_DIR` 为空时内存缓存仍可单独启用（仅在进程生命周期内有效，无持久化）。
 
 #### `IMAGE_TLS_HANDSHAKE_TIMEOUT_MS`（默认 `15000`）
 
