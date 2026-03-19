@@ -21,7 +21,10 @@ func main() {
 		logger.Fatalf("load config: %v", err)
 	}
 
-	application := appsvc.New(cfg, logger)
+	application, err := appsvc.New(cfg, logger)
+	if err != nil {
+		logger.Fatalf("create app: %v", err)
+	}
 	serverErrCh := make(chan error, 1)
 
 	go func() {

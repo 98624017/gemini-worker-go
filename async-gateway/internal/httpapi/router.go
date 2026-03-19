@@ -1,49 +1,64 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
 )
 
 type Router struct {
-	logger *log.Logger
+	logger         *log.Logger
+	submitHandler  http.Handler
+	getTaskHandler http.Handler
+	listHandler    http.Handler
+	contentHandler http.Handler
 }
 
-func NewRouter(logger *log.Logger) http.Handler {
-	return &Router{logger: logger}
+type Handlers struct {
+	SubmitTask  http.Handler
+	GetTask     http.Handler
+	ListTasks   http.Handler
+	TaskContent http.Handler
+}
+
+func NewRouter(logger *log.Logger, handlers Handlers) http.Handler {
+	return &Router{
+		logger:         logger,
+		submitHandler:  handlers.SubmitTask,
+		getTaskHandler: handlers.GetTask,
+		listHandler:    handlers.ListTasks,
+		contentHandler: handlers.TaskContent,
+	}
 }
 
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && isGenerateContentPath(r.URL.Path):
-		rt.writeNotImplemented(w, r)
+		rt.dispatchOrNotImplemented(rt.submitHandler, w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks":
-		rt.writeNotImplemented(w, r)
+		rt.dispatchOrNotImplemented(rt.listHandler, w, r)
 	case r.Method == http.MethodGet && isTaskStatusPath(r.URL.Path):
-		rt.writeNotImplemented(w, r)
+		rt.dispatchOrNotImplemented(rt.getTaskHandler, w, r)
 	case r.Method == http.MethodGet && isTaskContentPath(r.URL.Path):
-		rt.writeNotImplemented(w, r)
+		rt.dispatchOrNotImplemented(rt.contentHandler, w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (rt *Router) dispatchOrNotImplemented(handler http.Handler, w http.ResponseWriter, r *http.Request) {
+	if handler != nil {
+		handler.ServeHTTP(w, r)
+		return
+	}
+	rt.writeNotImplemented(w, r)
 }
 
 func (rt *Router) writeNotImplemented(w http.ResponseWriter, r *http.Request) {
 	if rt.logger != nil {
 		rt.logger.Printf("route scaffold hit: %s %s", r.Method, r.URL.Path)
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]string{
-			"code":    "not_implemented",
-			"message": "endpoint not implemented in task 1 scaffold",
-		},
-	})
+	writeError(w, http.StatusNotImplemented, "not_implemented", "endpoint not implemented in current task")
 }
 
 func isGenerateContentPath(path string) bool {
