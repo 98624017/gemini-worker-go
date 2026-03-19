@@ -1,6 +1,8 @@
 module banana-async-gateway
 
-go 1.22
+go 1.25
+
+toolchain go1.25.8
 
 require (
 	github.com/golang-migrate/migrate/v4 v4.17.1 // indirect
