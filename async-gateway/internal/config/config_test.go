@@ -4,7 +4,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"banana-async-gateway/internal/security"
 )
+
+const testEncryptionKeyBase64 = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
 
 func TestLoadFromEnvRequiresMandatorySettings(t *testing.T) {
 	cases := []struct {
@@ -94,13 +98,32 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("NEWAPI_BASE_URL", "http://newapi.internal")
 	t.Setenv("POSTGRES_DSN", "postgres://user:pass@localhost:5432/dbname?sslmode=disable")
 	t.Setenv("OWNER_HASH_SECRET", "owner-secret")
-	t.Setenv("TASK_PAYLOAD_ENCRYPTION_KEY", "payload-secret")
+	t.Setenv("TASK_PAYLOAD_ENCRYPTION_KEY", testEncryptionKeyBase64)
 	t.Setenv("LISTEN_ADDR", "")
 	t.Setenv("MAX_INFLIGHT_TASKS", "")
 	t.Setenv("MAX_QUEUE_SIZE", "")
 	t.Setenv("TASK_POLL_RETRY_AFTER_SEC", "")
 	t.Setenv("NEWAPI_REQUEST_TIMEOUT_MS", "")
 	t.Setenv("SHUTDOWN_GRACE_PERIOD_SEC", "")
+}
+
+func TestLoadFromEnvRejectsInvalidPayloadEncryptionKey(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("TASK_PAYLOAD_ENCRYPTION_KEY", "invalid-key")
+
+	_, err := LoadFromEnv()
+	if err == nil {
+		t.Fatalf("expected invalid encryption key error")
+	}
+	if !strings.Contains(err.Error(), "TASK_PAYLOAD_ENCRYPTION_KEY") {
+		t.Fatalf("expected TASK_PAYLOAD_ENCRYPTION_KEY error, got %v", err)
+	}
+}
+
+func TestTestEncryptionKeyBase64IsValid(t *testing.T) {
+	if _, err := security.ParseEncryptionKey(testEncryptionKeyBase64); err != nil {
+		t.Fatalf("test key must stay valid: %v", err)
+	}
 }
 
 func assertDuration(t *testing.T, field string, got, want time.Duration) {

@@ -21,7 +21,7 @@
 export NEWAPI_BASE_URL=http://newapi:3000
 export POSTGRES_DSN='postgres://user:pass@postgres:5432/banana_async_gateway?sslmode=disable'
 export OWNER_HASH_SECRET=replace-me
-export TASK_PAYLOAD_ENCRYPTION_KEY=replace-me
+export TASK_PAYLOAD_ENCRYPTION_KEY='MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
 
 go run ./cmd/banana-async-gateway
 ```
@@ -37,7 +37,7 @@ go run ./cmd/banana-async-gateway
 - `OWNER_HASH_SECRET`
   必填
 - `TASK_PAYLOAD_ENCRYPTION_KEY`
-  必填
+  必填，必须是 Base64 编码后的 `32` 字节密钥
 - `MAX_INFLIGHT_TASKS`
   默认 `32`
 - `MAX_QUEUE_SIZE`

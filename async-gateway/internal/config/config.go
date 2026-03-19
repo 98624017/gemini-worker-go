@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"banana-async-gateway/internal/security"
 )
 
 const (
@@ -66,6 +68,9 @@ func LoadFromEnv() (Config, error) {
 
 	if err := validateBaseURL(cfg.NewAPIBaseURL); err != nil {
 		return Config{}, fmt.Errorf("invalid NEWAPI_BASE_URL: %w", err)
+	}
+	if _, err := security.ParseEncryptionKey(cfg.TaskPayloadEncryptionKey); err != nil {
+		return Config{}, err
 	}
 
 	cfg.MaxInflightTasks = getPositiveIntOrDefault("MAX_INFLIGHT_TASKS", defaultMaxInflightTasks)
