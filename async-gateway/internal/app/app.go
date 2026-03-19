@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"time"
 
+	taskcache "banana-async-gateway/internal/cache"
 	"banana-async-gateway/internal/config"
 	"banana-async-gateway/internal/httpapi"
 	"banana-async-gateway/internal/queue"
+	taskratelimit "banana-async-gateway/internal/ratelimit"
 	"banana-async-gateway/internal/store"
 	"banana-async-gateway/internal/worker"
 
@@ -37,11 +39,17 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 	}
 	repository := store.NewRepository(pool)
 	taskQueue := queue.NewMemoryQueue(cfg.MaxQueueSize)
+	queryCache := taskcache.NewTaskCache(taskcache.Config{})
+	queryLimiter := taskratelimit.NewLimiter(taskratelimit.Config{
+		RefillInterval: time.Duration(cfg.TaskPollRetryAfterSec) * time.Second,
+		Burst:          1,
+	})
 	submitHandler, err := httpapi.NewSubmitHandler(cfg, repository, taskQueue)
 	if err != nil {
 		pool.Close()
 		return nil, err
 	}
+	queryHandler := httpapi.NewQueryHandler(cfg, repository, queryCache, queryLimiter)
 	workerPool, err := worker.NewPool(cfg, logger, repository, taskQueue)
 	if err != nil {
 		pool.Close()
@@ -58,7 +66,10 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 		server: &http.Server{
 			Addr: cfg.ListenAddr,
 			Handler: httpapi.NewRouter(logger, httpapi.Handlers{
-				SubmitTask: submitHandler,
+				SubmitTask:  submitHandler,
+				GetTask:     http.HandlerFunc(queryHandler.GetTask),
+				ListTasks:   http.HandlerFunc(queryHandler.ListTasks),
+				TaskContent: http.HandlerFunc(queryHandler.TaskContent),
 			}),
 			ReadHeaderTimeout: 5 * time.Second,
 		},
