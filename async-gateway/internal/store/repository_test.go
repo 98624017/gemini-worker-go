@@ -128,6 +128,25 @@ func TestMarkUncertain(t *testing.T) {
 	}
 }
 
+func TestMarkDispatchedRunningUncertain(t *testing.T) {
+	t.Parallel()
+
+	assertSQLContains(t, markDispatchedRunningUncertainSQL, "request_dispatched_at IS NOT NULL")
+
+	repo, mock := newRepositoryForTest(t)
+	mock.ExpectExec(regexp.QuoteMeta(markDispatchedRunningUncertainSQL)).
+		WithArgs("gateway_shutdown_uncertain", "gateway shutdown grace period elapsed before task completion").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	rows, err := repo.MarkDispatchedRunningUncertain(context.Background(), "gateway_shutdown_uncertain", "gateway shutdown grace period elapsed before task completion")
+	if err != nil {
+		t.Fatalf("MarkDispatchedRunningUncertain() error = %v", err)
+	}
+	if rows != 2 {
+		t.Fatalf("MarkDispatchedRunningUncertain() rows = %d, want %d", rows, 2)
+	}
+}
+
 func TestGetTaskByID(t *testing.T) {
 	t.Parallel()
 
@@ -237,6 +256,9 @@ func TestDeleteExpiredTasksBatch(t *testing.T) {
 
 func TestDeleteExpiredPayloadsBatch(t *testing.T) {
 	t.Parallel()
+
+	assertSQLContains(t, deleteExpiredPayloadsBatchSQL, "t.finished_at IS NOT NULL")
+	assertSQLContains(t, deleteExpiredPayloadsBatchSQL, "t.request_dispatched_at IS NOT NULL")
 
 	repo, mock := newRepositoryForTest(t)
 	cutoff := time.Date(2026, 3, 16, 0, 0, 0, 0, time.UTC)

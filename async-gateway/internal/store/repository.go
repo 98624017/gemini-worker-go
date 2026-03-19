@@ -115,6 +115,18 @@ SET status = 'uncertain',
 WHERE task_id = $1
   AND finished_at IS NULL
 `
+	markDispatchedRunningUncertainSQL = `
+UPDATE tasks
+SET status = 'uncertain',
+	error_code = $1,
+	error_message = $2,
+	transport_uncertain = TRUE,
+	finished_at = NOW(),
+	updated_at = NOW()
+WHERE status = 'running'
+  AND finished_at IS NULL
+  AND request_dispatched_at IS NOT NULL
+`
 	getTaskByIDSQL = `
 SELECT
 	task_id,
@@ -231,12 +243,17 @@ WHERE t.task_id = victims.task_id
 `
 	deleteExpiredPayloadsBatchSQL = `
 WITH victims AS (
-	SELECT task_id
-	FROM task_payloads
-	WHERE payload_expires_at < $1
-	ORDER BY payload_expires_at ASC
+	SELECT tp.task_id
+	FROM task_payloads tp
+	INNER JOIN tasks t ON t.task_id = tp.task_id
+	WHERE tp.payload_expires_at < $1
+	  AND (
+		t.finished_at IS NOT NULL
+		OR t.request_dispatched_at IS NOT NULL
+	  )
+	ORDER BY tp.payload_expires_at ASC
 	LIMIT $2
-	FOR UPDATE SKIP LOCKED
+	FOR UPDATE OF tp SKIP LOCKED
 )
 DELETE FROM task_payloads tp
 USING victims
@@ -312,6 +329,14 @@ func (r *Repository) FinishFailed(ctx context.Context, taskID, errorCode, errorM
 
 func (r *Repository) MarkUncertain(ctx context.Context, taskID, errorCode, errorMessage string) error {
 	return execAffectingOne(ctx, r.db, markUncertainSQL, taskID, errorCode, errorMessage)
+}
+
+func (r *Repository) MarkDispatchedRunningUncertain(ctx context.Context, errorCode, errorMessage string) (int64, error) {
+	tag, err := r.db.Exec(ctx, markDispatchedRunningUncertainSQL, errorCode, errorMessage)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 func (r *Repository) GetTaskByID(ctx context.Context, taskID string) (*domain.Task, error) {
