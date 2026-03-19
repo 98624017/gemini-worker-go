@@ -49,6 +49,12 @@ func TestLoadFromEnvInjectsDefaults(t *testing.T) {
 	if cfg.ListenAddr != defaultListenAddr {
 		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, defaultListenAddr)
 	}
+	if cfg.PostgresMaxOpenConns != defaultPostgresMaxOpenConns {
+		t.Fatalf("PostgresMaxOpenConns = %d, want %d", cfg.PostgresMaxOpenConns, defaultPostgresMaxOpenConns)
+	}
+	if cfg.PostgresMaxIdleConns != defaultPostgresMaxIdleConns {
+		t.Fatalf("PostgresMaxIdleConns = %d, want %d", cfg.PostgresMaxIdleConns, defaultPostgresMaxIdleConns)
+	}
 	if cfg.MaxInflightTasks != defaultMaxInflightTasks {
 		t.Fatalf("MaxInflightTasks = %d, want %d", cfg.MaxInflightTasks, defaultMaxInflightTasks)
 	}
@@ -71,6 +77,8 @@ func TestLoadFromEnvFallsBackToDefaultsForInvalidNumbers(t *testing.T) {
 	t.Setenv("MAX_INFLIGHT_TASKS", "bad")
 	t.Setenv("MAX_QUEUE_SIZE", "-1")
 	t.Setenv("TASK_POLL_RETRY_AFTER_SEC", "0")
+	t.Setenv("POSTGRES_MAX_OPEN_CONNS", "invalid")
+	t.Setenv("POSTGRES_MAX_IDLE_CONNS", "-5")
 	t.Setenv("NEWAPI_REQUEST_TIMEOUT_MS", "oops")
 	t.Setenv("SHUTDOWN_GRACE_PERIOD_SEC", "invalid")
 
@@ -84,6 +92,12 @@ func TestLoadFromEnvFallsBackToDefaultsForInvalidNumbers(t *testing.T) {
 
 	if cfg.MaxInflightTasks != defaultMaxInflightTasks {
 		t.Fatalf("MaxInflightTasks = %d, want %d", cfg.MaxInflightTasks, defaultMaxInflightTasks)
+	}
+	if cfg.PostgresMaxOpenConns != defaultPostgresMaxOpenConns {
+		t.Fatalf("PostgresMaxOpenConns = %d, want %d", cfg.PostgresMaxOpenConns, defaultPostgresMaxOpenConns)
+	}
+	if cfg.PostgresMaxIdleConns != defaultPostgresMaxIdleConns {
+		t.Fatalf("PostgresMaxIdleConns = %d, want %d", cfg.PostgresMaxIdleConns, defaultPostgresMaxIdleConns)
 	}
 	if cfg.MaxQueueSize != defaultMaxQueueSize {
 		t.Fatalf("MaxQueueSize = %d, want %d", cfg.MaxQueueSize, defaultMaxQueueSize)
@@ -103,6 +117,8 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("MAX_INFLIGHT_TASKS", "")
 	t.Setenv("MAX_QUEUE_SIZE", "")
 	t.Setenv("TASK_POLL_RETRY_AFTER_SEC", "")
+	t.Setenv("POSTGRES_MAX_OPEN_CONNS", "")
+	t.Setenv("POSTGRES_MAX_IDLE_CONNS", "")
 	t.Setenv("NEWAPI_REQUEST_TIMEOUT_MS", "")
 	t.Setenv("SHUTDOWN_GRACE_PERIOD_SEC", "")
 }

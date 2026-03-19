@@ -44,6 +44,10 @@ go run ./cmd/banana-async-gateway
   默认 `256`
 - `TASK_POLL_RETRY_AFTER_SEC`
   默认 `3`
+- `POSTGRES_MAX_OPEN_CONNS`
+  默认 `20`
+- `POSTGRES_MAX_IDLE_CONNS`
+  默认 `10`；在 `pgxpool` 下映射为预热连接下限
 - `NEWAPI_REQUEST_TIMEOUT_MS`
   默认 `660000`
 - `SHUTDOWN_GRACE_PERIOD_SEC`

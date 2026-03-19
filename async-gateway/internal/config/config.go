@@ -16,6 +16,8 @@ const (
 	defaultMaxInflightTasks      = 32
 	defaultMaxQueueSize          = 256
 	defaultTaskPollRetryAfterSec = 3
+	defaultPostgresMaxOpenConns  = 20
+	defaultPostgresMaxIdleConns  = 10
 	defaultNewAPIRequestTimeout  = 11 * time.Minute
 	defaultShutdownGracePeriod   = 30 * time.Second
 )
@@ -26,6 +28,8 @@ type Config struct {
 	PostgresDSN              string
 	OwnerHashSecret          string
 	TaskPayloadEncryptionKey string
+	PostgresMaxOpenConns     int
+	PostgresMaxIdleConns     int
 	MaxInflightTasks         int
 	MaxQueueSize             int
 	TaskPollRetryAfterSec    int
@@ -36,6 +40,8 @@ type Config struct {
 func LoadFromEnv() (Config, error) {
 	cfg := Config{
 		ListenAddr:            defaultListenAddr,
+		PostgresMaxOpenConns:  defaultPostgresMaxOpenConns,
+		PostgresMaxIdleConns:  defaultPostgresMaxIdleConns,
 		MaxInflightTasks:      defaultMaxInflightTasks,
 		MaxQueueSize:          defaultMaxQueueSize,
 		TaskPollRetryAfterSec: defaultTaskPollRetryAfterSec,
@@ -76,6 +82,8 @@ func LoadFromEnv() (Config, error) {
 	cfg.MaxInflightTasks = getPositiveIntOrDefault("MAX_INFLIGHT_TASKS", defaultMaxInflightTasks)
 	cfg.MaxQueueSize = getPositiveIntOrDefault("MAX_QUEUE_SIZE", defaultMaxQueueSize)
 	cfg.TaskPollRetryAfterSec = getPositiveIntOrDefault("TASK_POLL_RETRY_AFTER_SEC", defaultTaskPollRetryAfterSec)
+	cfg.PostgresMaxOpenConns = getPositiveIntOrDefault("POSTGRES_MAX_OPEN_CONNS", defaultPostgresMaxOpenConns)
+	cfg.PostgresMaxIdleConns = getPositiveIntOrDefault("POSTGRES_MAX_IDLE_CONNS", defaultPostgresMaxIdleConns)
 	cfg.NewAPIRequestTimeout = time.Duration(getPositiveIntOrDefault("NEWAPI_REQUEST_TIMEOUT_MS", int(defaultNewAPIRequestTimeout/time.Millisecond))) * time.Millisecond
 	cfg.ShutdownGracePeriod = time.Duration(getPositiveIntOrDefault("SHUTDOWN_GRACE_PERIOD_SEC", int(defaultShutdownGracePeriod/time.Second))) * time.Second
 
