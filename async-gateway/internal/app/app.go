@@ -11,6 +11,7 @@ import (
 	"banana-async-gateway/internal/httpapi"
 	"banana-async-gateway/internal/queue"
 	"banana-async-gateway/internal/store"
+	"banana-async-gateway/internal/worker"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -20,6 +21,7 @@ type App struct {
 	logger     *log.Logger
 	server     *http.Server
 	queue      *queue.MemoryQueue
+	workers    *worker.Pool
 	pool       *pgxpool.Pool
 	repository *store.Repository
 }
@@ -40,11 +42,17 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 		pool.Close()
 		return nil, err
 	}
+	workerPool, err := worker.NewPool(cfg, logger, repository, taskQueue)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
 
 	return &App{
 		cfg:        cfg,
 		logger:     logger,
 		queue:      taskQueue,
+		workers:    workerPool,
 		pool:       pool,
 		repository: repository,
 		server: &http.Server{
@@ -58,15 +66,21 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 }
 
 func (a *App) ListenAndServe() error {
+	if a.workers != nil {
+		a.workers.Start()
+	}
 	a.logger.Printf("async gateway listening on %s", a.cfg.ListenAddr)
 	return a.server.ListenAndServe()
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
-	if a.queue != nil {
-		a.queue.Close()
-	}
 	err := a.server.Shutdown(ctx)
+	if a.workers != nil {
+		a.workers.CloseQueue()
+		if workerErr := a.workers.Shutdown(ctx); workerErr != nil && err == nil {
+			err = workerErr
+		}
+	}
 	if a.pool != nil {
 		a.pool.Close()
 	}
