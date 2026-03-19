@@ -5,3 +5,5 @@ dist
 tmp
 *.log
 coverage.out
+banana-async-gateway
+banana-async-migrate

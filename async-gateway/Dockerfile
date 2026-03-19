@@ -8,11 +8,12 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-	go build -o /out/banana-async-gateway ./cmd/banana-async-gateway
+	go build -trimpath -ldflags="-s -w" -o /out/banana-async-gateway ./cmd/banana-async-gateway
 
 FROM alpine:3.20
 
-RUN adduser -D -H -u 10001 banana
+RUN apk add --no-cache ca-certificates \
+	&& adduser -D -H -u 10001 banana
 
 WORKDIR /app
 

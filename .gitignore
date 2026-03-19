@@ -4,6 +4,8 @@ gemini-worker-go.exe
 main
 main.exe
 *.exe
+async-gateway/banana-async-gateway
+async-gateway/banana-async-migrate
 
 # Test / dev data
 response.json

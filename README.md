@@ -2,6 +2,25 @@
 
 该目录是 `banana-proxy` 中 Gemini 兼容入口的 Go 实现，用于把下游的 Gemini 请求转发到上游，并在响应侧做必要的图片/返回体处理。
 
+## Async Gateway 子项目
+
+仓库内新增了独立子项目 [`async-gateway/`](async-gateway/README.md)，用于承载 A3 Async Local Gateway。
+
+职责边界：
+
+- 根目录 `gemini-worker-go`
+  继续处理同步 Gemini 兼容入口，以及 URL 型 `inlineData` → base64、`output=url` 等现有下游适配逻辑。
+- `async-gateway`
+  负责异步任务受理、状态持久化、后台 worker 转发 `NewAPI`、最近 3 天任务查询、恢复扫描与 TTL 清理。
+- `NewAPI`
+  继续负责鉴权、账务和额度。
+
+如果你要部署 A3 异步网关，优先查看：
+
+- `async-gateway/README.md`
+- `async-gateway/deploy/banana-async-gateway.env.example`
+- `async-gateway/deploy/nginx.async_gateway.conf.example`
+
 ## 对外 HTTP 入口（简要）
 
 - `POST /v1beta/models/:model:generateContent`
