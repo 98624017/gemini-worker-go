@@ -21,6 +21,21 @@
 - `async-gateway/deploy/banana-async-gateway.env.example`
 - `async-gateway/deploy/nginx.async_gateway.conf.example`
 
+如果你要跑一次真实异步联调烟测，优先用：
+
+- `async-gateway/scripts/run_live_smoke.sh`
+- `async-gateway/cmd/banana-async-smoke`
+
+如果你要先做不依赖真实上游的离线回归，优先用：
+
+- `async-gateway/scripts/run_live_smoke_test.sh`
+- `.github/workflows/async-gateway-ci.yml`
+
+烟测支持两种输入模式：
+
+- 默认 prompt 模式：只设置 `SMOKE_PROMPT`
+- 完整请求体模式：设置 `SMOKE_BODY_FILE=/path/to/request.json`，直接提交完整 JSON body
+
 ## 对外 HTTP 入口（简要）
 
 - `POST /v1beta/models/:model:generateContent`

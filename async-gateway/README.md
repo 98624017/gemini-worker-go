@@ -96,6 +96,86 @@ docker build -t banana-async-gateway .
 
 ## 烟测命令
 
+### 自动烟测
+
+新增了两种自动化入口：
+
+- `go run ./cmd/banana-async-smoke`
+  适用于已经有运行中的本地 A3 gateway
+- `./scripts/run_live_smoke.sh`
+  适用于本机临时起一个 PostgreSQL + 本地 A3 gateway，然后对真实 `NewAPI` 发起一次完整异步调用
+- `bash ./scripts/run_live_smoke_test.sh`
+  适用于离线校验烟测脚本自身的就绪守卫逻辑，确保端口冲突或网关提前退出时不会误报成功
+
+一键端到端烟测示例：
+
+```bash
+cd async-gateway
+
+SMOKE_NEWAPI_BASE_URL="https://api.xinbaoai.com" \
+SMOKE_API_KEY="<newapi-user-api-key>" \
+./scripts/run_live_smoke.sh
+```
+
+如果你要用完整请求体而不是默认 prompt，可以把 JSON 保存成文件，再透传给烟测：
+
+```bash
+cd async-gateway
+
+SMOKE_NEWAPI_BASE_URL="https://api.xinbaoai.com" \
+SMOKE_API_KEY="<newapi-user-api-key>" \
+SMOKE_BODY_FILE="/tmp/banana-request.json" \
+./scripts/run_live_smoke.sh
+```
+
+说明：
+
+- 脚本会临时启动一个 `postgres:16-alpine`
+- 自动执行 migration
+- 自动启动本地 `banana-async-gateway`
+- 就绪阶段会校验新启动的 gateway 进程仍存活，避免误探测到占用同端口的旧服务
+- 提交一条 gzip JSON 异步请求
+- 轮询 `GET /v1/tasks/{id}`
+- 验证 `GET /v1/tasks`
+- 验证 `GET /v1/tasks/{id}/content`
+- 校验 `/v1/tasks/{id}` 里的 `inlineData.data` 确实是 `http/https` 图片 URL，而不是 base64 或其他伪 URL
+
+本地离线回归命令：
+
+```bash
+cd async-gateway
+
+bash -n scripts/run_live_smoke.sh scripts/run_live_smoke_lib.sh scripts/run_live_smoke_test.sh
+bash scripts/run_live_smoke_test.sh
+go test ./cmd/banana-async-smoke ./internal/smoketest -count=1
+```
+
+CI 说明：
+
+- 仓库内新增了 `.github/workflows/async-gateway-ci.yml`
+- 当 `async-gateway/**` 或该 workflow 本身发生变更时，会自动运行：
+  - smoke shell 语法检查
+  - smoke shell 回归测试
+  - `banana-async-smoke` 与 `internal/smoketest` 的 Go 测试
+  - `async-gateway` 全量 `go test ./...`
+
+可选环境变量：
+
+- `SMOKE_GATEWAY_ADDR`
+  默认 `127.0.0.1:18080`
+- `SMOKE_PG_PORT`
+  默认 `55432`
+- `SMOKE_MODEL`
+  默认 `gemini-3-pro-image-preview`
+- `SMOKE_PROMPT`
+  默认香蕉图片提示词
+- `SMOKE_BODY_FILE`
+  可选。若设置，则直接读取完整 JSON 请求体文件并提交；设置后会覆盖默认 `SMOKE_PROMPT`
+- `SMOKE_TIMEOUT_SEC`
+  默认 `600`
+- `SMOKE_POLL_INTERVAL_SEC`
+  默认 `3`
+
 前提：
 
 - PostgreSQL、`NewAPI`、根目录 `gemini-worker-go`、A3 gateway 已启动

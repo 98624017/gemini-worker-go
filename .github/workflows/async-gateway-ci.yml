@@ -1,0 +1,40 @@
+name: async-gateway-ci
+
+on:
+  push:
+    paths:
+      - ".github/workflows/async-gateway-ci.yml"
+      - "async-gateway/**"
+  pull_request:
+    paths:
+      - ".github/workflows/async-gateway-ci.yml"
+      - "async-gateway/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: async-gateway
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: async-gateway/go.mod
+          cache-dependency-path: async-gateway/go.sum
+
+      - name: Verify Smoke Scripts Syntax
+        run: bash -n scripts/run_live_smoke.sh scripts/run_live_smoke_lib.sh scripts/run_live_smoke_test.sh
+
+      - name: Run Smoke Script Guard Tests
+        run: bash scripts/run_live_smoke_test.sh
+
+      - name: Run Async Smoke Go Tests
+        run: go test ./cmd/banana-async-smoke ./internal/smoketest -count=1
+
+      - name: Run Async Gateway Unit Tests
+        run: go test ./... -count=1
