@@ -92,7 +92,14 @@ go run ./cmd/banana-async-gateway
 docker build -t banana-async-gateway .
 ```
 
-镜像只打包 `banana-async-gateway` 运行二进制，不影响根目录现有镜像。
+镜像当前同时打包：
+
+- `banana-async-gateway`
+- `banana-async-migrate`
+- `migrations/`
+
+默认入口仍然是 `banana-async-gateway`，因此不会影响正常服务启动；如果需要
+独立执行 migration，可以覆盖启动命令为 `banana-async-migrate up`。
 
 ## 烟测命令
 
@@ -204,6 +211,31 @@ ghcr.io/<owner>/banana-async-gateway
 docker pull ghcr.io/<owner>/banana-async-gateway:main
 docker pull ghcr.io/<owner>/banana-async-gateway:v1.2.3
 ```
+
+## Zeabur 独立 Migration 任务
+
+针对 Zeabur 首次上线，推荐使用“同一镜像 + 临时 migration 服务”的模式。
+
+首次部署步骤：
+
+1. 先准备 PostgreSQL，以及正式服务要用的全部环境变量
+2. 新建一个临时 migration 服务，镜像使用：
+   `ghcr.io/<owner>/banana-async-gateway:<tag>`
+3. 启动命令覆盖为：
+   `banana-async-migrate up`
+4. 等待日志出现以下任一结果：
+   - `banana-async-migrate ... migrate up complete`
+   - `banana-async-migrate ... no change`
+5. migration 成功后删除这个临时服务
+6. 再部署正常版 `banana-async-gateway` 服务
+
+注意事项：
+
+- migration 服务不需要暴露端口
+- migration 服务与正式服务必须使用同一个 `POSTGRES_DSN`
+- 如果 `POSTGRES_DSN` 指向了错误数据库，migration 虽然能执行，但正式服务仍会查不到预期数据
+- 后续版本如果没有新增 migration，可以直接升级正式服务
+- 后续版本如果新增 migration，先跑一次临时 migration 服务，再升级正式服务
 
 可选环境变量：
 
