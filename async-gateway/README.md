@@ -159,6 +159,52 @@ CI 说明：
   - `banana-async-smoke` 与 `internal/smoketest` 的 Go 测试
   - `async-gateway` 全量 `go test ./...`
 
+## GHCR 镜像发布
+
+仓库根目录新增了 `.github/workflows/async-gateway-ghcr.yml`，用于把
+`async-gateway` 的 Docker 镜像发布到 GHCR。
+
+触发规则：
+
+- `push` 到 `main` 时自动构建并推送
+- 推送 `v*` tag 时自动构建并推送正式版本
+- 支持在 GitHub Actions 页面手动 `workflow_dispatch`
+
+镜像名固定为：
+
+```text
+ghcr.io/<owner>/banana-async-gateway
+```
+
+标签规则：
+
+- `main` 分支推送：
+  - `main`
+  - `sha-<shortsha>`
+- `v1.2.3` 这类 tag 推送：
+  - `v1.2.3`
+  - `1.2.3`
+  - `1.2`
+  - `1`
+  - `latest`
+
+权限说明：
+
+- workflow 使用仓库默认 `GITHUB_TOKEN` 登录 GHCR
+- 需要仓库 Actions 具备包写入权限；若组织策略收紧，请确认
+  `packages: write` 已允许
+
+当前镜像架构：
+
+- 与现有 `Dockerfile` 保持一致，默认发布 `linux/amd64`
+
+拉取示例：
+
+```bash
+docker pull ghcr.io/<owner>/banana-async-gateway:main
+docker pull ghcr.io/<owner>/banana-async-gateway:v1.2.3
+```
+
 可选环境变量：
 
 - `SMOKE_GATEWAY_ADDR`
