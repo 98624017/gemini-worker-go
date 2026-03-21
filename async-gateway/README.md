@@ -73,7 +73,7 @@ go run ./cmd/banana-async-gateway
 - `MAX_QUEUE_SIZE`
   默认 `256`
 - `TASK_POLL_RETRY_AFTER_SEC`
-  默认 `3`
+  默认 `10`
 - `NEWAPI_REQUEST_TIMEOUT_MS`
   默认 `1200000`
 - `SHUTDOWN_GRACE_PERIOD_SEC`
@@ -188,7 +188,7 @@ POST /v1/tasks/batch-get
       }
     }
   ],
-  "next_poll_after_ms": 3000
+  "next_poll_after_ms": 10000
 }
 ```
 
@@ -366,7 +366,7 @@ docker pull ghcr.io/<owner>/banana-async-gateway:v1.2.3
 - `SMOKE_TIMEOUT_SEC`
   默认 `600`
 - `SMOKE_POLL_INTERVAL_SEC`
-  默认 `3`
+  默认 `10`
 
 前提：
 

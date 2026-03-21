@@ -16,7 +16,7 @@ const (
 	defaultGatewayBaseURL = "http://127.0.0.1:18080"
 	defaultModel          = "gemini-3-pro-image-preview"
 	defaultPrompt         = "draw a single ripe yellow banana on a clean white background"
-	defaultPollInterval   = 3 * time.Second
+	defaultPollInterval   = 10 * time.Second
 	defaultTimeout        = 10 * time.Minute
 )
 

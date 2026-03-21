@@ -15,7 +15,7 @@ const (
 	defaultListenAddr            = ":8080"
 	defaultMaxInflightTasks      = 32
 	defaultMaxQueueSize          = 256
-	defaultTaskPollRetryAfterSec = 3
+	defaultTaskPollRetryAfterSec = 10
 	defaultPostgresMaxOpenConns  = 20
 	defaultPostgresMaxIdleConns  = 10
 	defaultNewAPIRequestTimeout  = 20 * time.Minute

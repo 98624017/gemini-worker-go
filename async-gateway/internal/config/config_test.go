@@ -78,6 +78,12 @@ func TestDefaultNewAPIRequestTimeoutIsTwentyMinutes(t *testing.T) {
 	}
 }
 
+func TestDefaultTaskPollRetryAfterIsTenSeconds(t *testing.T) {
+	if defaultTaskPollRetryAfterSec != 10 {
+		t.Fatalf("defaultTaskPollRetryAfterSec = %d, want %d", defaultTaskPollRetryAfterSec, 10)
+	}
+}
+
 func TestLoadFromEnvFallsBackToDefaultsForInvalidNumbers(t *testing.T) {
 	setValidEnv(t)
 	t.Setenv("MAX_INFLIGHT_TASKS", "bad")
