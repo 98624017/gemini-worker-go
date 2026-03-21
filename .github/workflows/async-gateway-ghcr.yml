@@ -11,6 +11,9 @@ on:
       - "async-gateway/**"
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 concurrency:
   group: async-gateway-ghcr-${{ github.ref }}
   cancel-in-progress: true
