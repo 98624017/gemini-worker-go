@@ -148,6 +148,27 @@ SELECT
 FROM tasks
 WHERE task_id = $1
 `
+	getTasksByIDsSQL = `
+SELECT
+	task_id,
+	status,
+	model,
+	owner_hash,
+	request_path,
+	request_query,
+	worker_id,
+	heartbeat_at,
+	request_dispatched_at,
+	result_summary_json,
+	error_code,
+	error_message,
+	transport_uncertain,
+	created_at,
+	updated_at,
+	finished_at
+FROM tasks
+WHERE task_id = ANY($1)
+`
 	getTaskPayloadSQL = `
 SELECT
 	task_id,
@@ -349,6 +370,32 @@ func (r *Repository) GetTaskByID(ctx context.Context, taskID string) (*domain.Ta
 		return nil, fmt.Errorf("get task by id: %w", err)
 	}
 	return task, nil
+}
+
+func (r *Repository) GetTasksByIDs(ctx context.Context, ids []string) (map[string]*domain.Task, error) {
+	if len(ids) == 0 {
+		return map[string]*domain.Task{}, nil
+	}
+
+	rows, err := r.db.Query(ctx, getTasksByIDsSQL, ids)
+	if err != nil {
+		return nil, fmt.Errorf("get tasks by ids: %w", err)
+	}
+	defer rows.Close()
+
+	tasks := make(map[string]*domain.Task, len(ids))
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan batch task: %w", err)
+		}
+		tasks[task.ID] = task
+	}
+	if rows.Err() != nil {
+		return nil, fmt.Errorf("iterate batch tasks: %w", rows.Err())
+	}
+
+	return tasks, nil
 }
 
 func (r *Repository) GetTaskPayload(ctx context.Context, taskID string) (*domain.TaskPayload, error) {

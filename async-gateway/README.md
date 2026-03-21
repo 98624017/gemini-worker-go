@@ -75,7 +75,7 @@ go run ./cmd/banana-async-gateway
 - `TASK_POLL_RETRY_AFTER_SEC`
   默认 `3`
 - `NEWAPI_REQUEST_TIMEOUT_MS`
-  默认 `660000`
+  默认 `1200000`
 - `SHUTDOWN_GRACE_PERIOD_SEC`
   默认 `30`
 
@@ -85,6 +85,120 @@ go run ./cmd/banana-async-gateway
 - 清理 batch size：`100`
 - 清理间隔：`60s`
 - 任务摘要保留期：`72h`
+
+## 任务查询接口
+
+### 单任务状态
+
+```text
+GET /v1/tasks/{id}
+```
+
+返回体顶层是异步任务资源；当任务成功时，`candidates` 内部继续保持接近
+Gemini `generateContent` 的结果风格：
+
+```json
+{
+  "id": "img_xxx",
+  "object": "image.task",
+  "model": "gemini-3-pro-image-preview",
+  "created_at": 1773964800,
+  "status": "succeeded",
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "inlineData": {
+              "mimeType": "image/png",
+              "data": "https://example.com/final.png"
+            }
+          }
+        ]
+      },
+      "finishReason": "STOP"
+    }
+  ]
+}
+```
+
+### 批量状态查询
+
+```text
+POST /v1/tasks/batch-get
+```
+
+请求体：
+
+```json
+{
+  "ids": ["img_a", "img_b", "img_c"]
+}
+```
+
+约束：
+
+- `ids` 必须是非空数组
+- 单次最多 `100` 个任务 ID
+- 重复 ID 会按首次出现顺序去重
+- 只能查询当前 `Authorization` 对应 `owner_hash` 下的任务
+
+响应示例：
+
+```json
+{
+  "object": "batch.task.list",
+  "items": [
+    {
+      "id": "img_a",
+      "object": "image.task",
+      "model": "gemini-3-pro-image-preview",
+      "created_at": 1773964800,
+      "status": "running"
+    },
+    {
+      "id": "img_b",
+      "object": "image.task",
+      "model": "gemini-3-pro-image-preview",
+      "created_at": 1773964801,
+      "status": "succeeded",
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              {
+                "inlineData": {
+                  "mimeType": "image/png",
+                  "data": "https://example.com/final.png"
+                }
+              }
+            ]
+          },
+          "finishReason": "STOP"
+        }
+      ]
+    },
+    {
+      "id": "img_c",
+      "object": "image.task",
+      "status": "not_found",
+      "error": {
+        "code": "not_found",
+        "message": "task not found"
+      }
+    }
+  ],
+  "next_poll_after_ms": 3000
+}
+```
+
+说明：
+
+- `items` 内部字段尽量复用单任务 `GET /v1/tasks/{id}` 的返回风格
+- `not_found` 会同时覆盖“不存在”和“不属于当前 owner”的情况，避免泄露任务存在性
+- 客户端应把多个 pending 任务对齐到统一节拍，每轮仅批量查询仍在进行中的任务
+- 终态任务应及时移出轮询集合
+- `next_poll_after_ms` 是服务端建议的下一轮轮询间隔
 
 ## Docker 构建
 

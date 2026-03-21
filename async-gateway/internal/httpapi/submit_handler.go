@@ -145,8 +145,16 @@ func (h *SubmitHandler) writeValidationError(w http.ResponseWriter, err error) {
 
 func extractForwardHeaders(header http.Header) map[string]string {
 	result := map[string]string{}
-	for _, key := range []string{"Content-Type", "Accept", "X-Request-ID"} {
-		if value := strings.TrimSpace(header.Get(key)); value != "" {
+	for _, key := range []string{
+		"Content-Type",
+		"Accept",
+		"X-Request-ID",
+		"X-Forwarded-For",
+		"X-Real-IP",
+		"X-Forwarded-Proto",
+		"Forwarded",
+	} {
+		if value := strings.TrimSpace(strings.Join(header.Values(key), ", ")); value != "" {
 			result[key] = value
 		}
 	}

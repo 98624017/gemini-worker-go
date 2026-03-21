@@ -111,6 +111,76 @@ func TestSubmitAccepted(t *testing.T) {
 	}
 }
 
+func TestSubmitAcceptedPreservesTrustedForwardHeaders(t *testing.T) {
+	t.Parallel()
+
+	repo := &submitRepositoryStub{}
+	queue := &submitQueueStub{allowEnqueue: true}
+	handler := newSubmitHandlerForTest(t, repo, queue)
+
+	req := newSubmitRequest(t, makeSubmitBody("draw cat"), "Bearer sk-live", "")
+	req.Header.Set("X-Forwarded-For", "203.0.113.10, 10.0.0.2")
+	req.Header.Set("X-Real-IP", "203.0.113.10")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Forwarded", `for=203.0.113.10;proto=https;host=async.example.com`)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if repo.createdPayload == nil {
+		t.Fatalf("expected created payload")
+	}
+
+	got := repo.createdPayload.ForwardHeaders
+	if got["X-Forwarded-For"] != "203.0.113.10, 10.0.0.2" {
+		t.Fatalf("X-Forwarded-For = %q", got["X-Forwarded-For"])
+	}
+	if got["X-Real-IP"] != "203.0.113.10" {
+		t.Fatalf("X-Real-IP = %q", got["X-Real-IP"])
+	}
+	if got["X-Forwarded-Proto"] != "https" {
+		t.Fatalf("X-Forwarded-Proto = %q", got["X-Forwarded-Proto"])
+	}
+	if got["Forwarded"] != `for=203.0.113.10;proto=https;host=async.example.com` {
+		t.Fatalf("Forwarded = %q", got["Forwarded"])
+	}
+}
+
+func TestSubmitAcceptedPreservesRepeatedTrustedForwardHeaders(t *testing.T) {
+	t.Parallel()
+
+	repo := &submitRepositoryStub{}
+	queue := &submitQueueStub{allowEnqueue: true}
+	handler := newSubmitHandlerForTest(t, repo, queue)
+
+	req := newSubmitRequest(t, makeSubmitBody("draw cat"), "Bearer sk-live", "")
+	req.Header.Add("X-Forwarded-For", "203.0.113.10")
+	req.Header.Add("X-Forwarded-For", "10.0.0.2")
+	req.Header.Add("Forwarded", `for=203.0.113.10;proto=https`)
+	req.Header.Add("Forwarded", `for=10.0.0.2;by=proxy.internal`)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
+	}
+	if repo.createdPayload == nil {
+		t.Fatalf("expected created payload")
+	}
+
+	got := repo.createdPayload.ForwardHeaders
+	if got["X-Forwarded-For"] != "203.0.113.10, 10.0.0.2" {
+		t.Fatalf("X-Forwarded-For = %q", got["X-Forwarded-For"])
+	}
+	if got["Forwarded"] != `for=203.0.113.10;proto=https, for=10.0.0.2;by=proxy.internal` {
+		t.Fatalf("Forwarded = %q", got["Forwarded"])
+	}
+}
+
 func TestSubmitQueueFullReturns503AndMarksFailed(t *testing.T) {
 	t.Parallel()
 

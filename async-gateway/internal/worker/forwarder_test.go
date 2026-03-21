@@ -72,6 +72,54 @@ func TestForwarderPreservesPathQueryBodyAndAuthorization(t *testing.T) {
 	}
 }
 
+func TestForwarderPreservesTrustedForwardHeaders(t *testing.T) {
+	t.Parallel()
+
+	var (
+		gotForwardedFor   string
+		gotRealIP         string
+		gotForwardedProto string
+		gotForwarded      string
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotForwardedFor = r.Header.Get("X-Forwarded-For")
+		gotRealIP = r.Header.Get("X-Real-IP")
+		gotForwardedProto = r.Header.Get("X-Forwarded-Proto")
+		gotForwarded = r.Header.Get("Forwarded")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"finishReason":"STOP","content":{"parts":[{"inlineData":{"data":"https://example.com/final.png","mimeType":"image/png"}}]}}]}`))
+	}))
+	defer server.Close()
+
+	forwarder := newForwarderForTest(t, server.URL)
+	task, payload := makeForwardFixture(t)
+	payload.ForwardHeaders["X-Forwarded-For"] = "203.0.113.10, 10.0.0.2"
+	payload.ForwardHeaders["X-Real-IP"] = "203.0.113.10"
+	payload.ForwardHeaders["X-Forwarded-Proto"] = "https"
+	payload.ForwardHeaders["Forwarded"] = `for=203.0.113.10;proto=https;host=async.example.com`
+
+	outcome, err := forwarder.Forward(context.Background(), task, payload, func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatalf("Forward() error = %v", err)
+	}
+	if outcome.ErrorCode != "" || outcome.Summary == nil {
+		t.Fatalf("unexpected outcome = %#v", outcome)
+	}
+	if gotForwardedFor != "203.0.113.10, 10.0.0.2" {
+		t.Fatalf("X-Forwarded-For = %q", gotForwardedFor)
+	}
+	if gotRealIP != "203.0.113.10" {
+		t.Fatalf("X-Real-IP = %q", gotRealIP)
+	}
+	if gotForwardedProto != "https" {
+		t.Fatalf("X-Forwarded-Proto = %q", gotForwardedProto)
+	}
+	if gotForwarded != `for=203.0.113.10;proto=https;host=async.example.com` {
+		t.Fatalf("Forwarded = %q", gotForwarded)
+	}
+}
+
 func TestForwarderClassifiesHTTPStatusCodes(t *testing.T) {
 	t.Parallel()
 
@@ -142,16 +190,13 @@ func TestForwarderMarksTransportUncertainWhenConnectionDropsAfterDispatch(t *tes
 	}
 }
 
-func TestForwarderRetriesSingle408(t *testing.T) {
+func TestForwarderFailsSingle408WithoutRetry(t *testing.T) {
 	t.Parallel()
 
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			http.Error(w, "timeout", http.StatusRequestTimeout)
-			return
-		}
-		_, _ = w.Write([]byte(`{"candidates":[{"finishReason":"STOP","content":{"parts":[{"inlineData":{"data":"https://example.com/final.png","mimeType":"image/png"}}]}}]}`))
+		calls.Add(1)
+		http.Error(w, "timeout", http.StatusRequestTimeout)
 	}))
 	defer server.Close()
 
@@ -162,8 +207,8 @@ func TestForwarderRetriesSingle408(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Forward() error = %v", err)
 	}
-	if calls.Load() != 2 || outcome.ErrorCode != "" {
-		t.Fatalf("unexpected retry outcome calls=%d outcome=%#v", calls.Load(), outcome)
+	if calls.Load() != 1 || outcome.ErrorCode != "upstream_timeout" {
+		t.Fatalf("unexpected timeout outcome calls=%d outcome=%#v", calls.Load(), outcome)
 	}
 }
 

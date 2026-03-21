@@ -68,24 +68,17 @@ func (f *Forwarder) Forward(ctx context.Context, task *domain.Task, payload *dom
 		}, nil
 	}
 
-	attempts := 1
-	for {
-		outcome, retry, callErr := f.doForward(ctx, requestURL, authHeader, task, payload, onDispatched)
-		if callErr != nil {
-			return ForwardOutcome{}, callErr
-		}
-		if retry {
-			attempts++
-			if attempts <= 2 {
-				continue
-			}
-			return ForwardOutcome{
-				ErrorCode:    "upstream_timeout",
-				ErrorMessage: "upstream request timed out",
-			}, nil
-		}
-		return outcome, nil
+	outcome, retry, callErr := f.doForward(ctx, requestURL, authHeader, task, payload, onDispatched)
+	if callErr != nil {
+		return ForwardOutcome{}, callErr
 	}
+	if retry {
+		return ForwardOutcome{
+			ErrorCode:    "upstream_timeout",
+			ErrorMessage: "upstream request timed out",
+		}, nil
+	}
+	return outcome, nil
 }
 
 func (f *Forwarder) doForward(ctx context.Context, requestURL, authHeader string, task *domain.Task, payload *domain.TaskPayload, onDispatched func(context.Context) error) (ForwardOutcome, bool, error) {

@@ -2,10 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,14 +22,19 @@ import (
 )
 
 const (
-	defaultListDays  = 3
-	maxListDays      = 3
-	defaultListLimit = 20
-	maxListLimit     = 100
+	defaultListDays      = 3
+	maxListDays          = 3
+	defaultListLimit     = 20
+	maxListLimit         = 100
+	maxBatchGetTaskIDs   = 100
+	maxBatchGetBodyBytes = 64 * 1024
 )
+
+var errBatchGetBodyTooLarge = errors.New("batch get body too large")
 
 type queryRepository interface {
 	GetTaskByID(ctx context.Context, taskID string) (*domain.Task, error)
+	GetTasksByIDs(ctx context.Context, ids []string) (map[string]*domain.Task, error)
 	ListTasksByOwner(ctx context.Context, ownerHash string, since time.Time, limit int, beforeCreatedAt *time.Time, beforeID string) ([]domain.TaskSummary, error)
 }
 
@@ -165,6 +173,49 @@ func (h *QueryHandler) TaskContent(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, task.ResultSummary.ImageURLs[0], http.StatusFound)
 }
 
+func (h *QueryHandler) BatchGetTasks(w http.ResponseWriter, r *http.Request) {
+	ownerHash, ok := h.authorize(w, r)
+	if !ok {
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxBatchGetBodyBytes)
+	ids, err := parseBatchGetTaskIDs(r)
+	if err != nil {
+		if errors.Is(err, errBatchGetBodyTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !h.allow(w, h.rateLimitKey(batchRateLimitScope(ids), ownerHash, clientIP(r))) {
+		return
+	}
+
+	tasksByID, err := h.loadTasksByIDs(r.Context(), ids)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "unknown_error", err.Error())
+		return
+	}
+
+	items := make([]map[string]any, 0, len(ids))
+	for _, id := range ids {
+		task, found := tasksByID[id]
+		if !found || task.OwnerHash != ownerHash {
+			items = append(items, buildBatchTaskNotFoundResponse(id))
+			continue
+		}
+		items = append(items, buildTaskResponse(task))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object":             "batch.task.list",
+		"items":              items,
+		"next_poll_after_ms": h.retryAfterSeconds * 1000,
+	})
+}
+
 func (h *QueryHandler) authorize(w http.ResponseWriter, r *http.Request) (string, bool) {
 	ownerHash, err := security.DeriveOwnerHash(h.ownerHashSecret, r.Header.Get("Authorization"))
 	if err != nil {
@@ -200,6 +251,33 @@ func (h *QueryHandler) loadTask(ctx context.Context, taskID string) (*domain.Tas
 
 	h.cache.SetTask(task)
 	return task, true, nil
+}
+
+func (h *QueryHandler) loadTasksByIDs(ctx context.Context, ids []string) (map[string]*domain.Task, error) {
+	tasksByID := make(map[string]*domain.Task, len(ids))
+	missingIDs := make([]string, 0, len(ids))
+
+	for _, id := range ids {
+		if task, ok := h.cache.GetTask(id); ok {
+			tasksByID[id] = task
+			continue
+		}
+		missingIDs = append(missingIDs, id)
+	}
+
+	if len(missingIDs) == 0 {
+		return tasksByID, nil
+	}
+
+	loadedTasks, err := h.repo.GetTasksByIDs(ctx, missingIDs)
+	if err != nil {
+		return nil, err
+	}
+	for id, task := range loadedTasks {
+		h.cache.SetTask(task)
+		tasksByID[id] = task
+	}
+	return tasksByID, nil
 }
 
 func (h *QueryHandler) rateLimitKey(scope, ownerHash, ip string) string {
@@ -243,6 +321,30 @@ func buildTaskResponse(task *domain.Task) map[string]any {
 	}
 
 	return response
+}
+
+func buildBatchTaskNotFoundResponse(taskID string) map[string]any {
+	return map[string]any{
+		"id":     taskID,
+		"object": "image.task",
+		"status": "not_found",
+		"error": map[string]string{
+			"code":    "not_found",
+			"message": "task not found",
+		},
+	}
+}
+
+func batchRateLimitScope(ids []string) string {
+	normalized := append([]string(nil), ids...)
+	sort.Strings(normalized)
+
+	hasher := fnv.New64a()
+	for _, id := range normalized {
+		_, _ = hasher.Write([]byte(id))
+		_, _ = hasher.Write([]byte{0})
+	}
+	return fmt.Sprintf("batch:%x", hasher.Sum64())
 }
 
 func buildSuccessCandidate(summary *domain.ResultSummary) map[string]any {
@@ -341,6 +443,45 @@ func parseBeforeCursor(rawUnix, beforeID string) (*time.Time, string, error) {
 	}
 	value := time.Unix(parsed, 0).UTC()
 	return &value, beforeID, nil
+}
+
+func parseBatchGetTaskIDs(r *http.Request) ([]string, error) {
+	var request struct {
+		IDs []string `json:"ids"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return nil, errBatchGetBodyTooLarge
+		}
+		return nil, fmt.Errorf("request body must be a valid json object")
+	}
+
+	if len(request.IDs) == 0 {
+		return nil, fmt.Errorf("ids must be a non-empty array")
+	}
+	if len(request.IDs) > maxBatchGetTaskIDs {
+		return nil, fmt.Errorf("ids must not contain more than %d items", maxBatchGetTaskIDs)
+	}
+
+	uniqueIDs := make([]string, 0, len(request.IDs))
+	seen := make(map[string]struct{}, len(request.IDs))
+	for _, rawID := range request.IDs {
+		taskID := strings.TrimSpace(rawID)
+		if taskID == "" {
+			return nil, fmt.Errorf("ids must not contain empty values")
+		}
+		if _, exists := seen[taskID]; exists {
+			continue
+		}
+		seen[taskID] = struct{}{}
+		uniqueIDs = append(uniqueIDs, taskID)
+	}
+
+	return uniqueIDs, nil
 }
 
 func isPendingStatus(status domain.TaskStatus) bool {

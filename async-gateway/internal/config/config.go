@@ -18,7 +18,7 @@ const (
 	defaultTaskPollRetryAfterSec = 3
 	defaultPostgresMaxOpenConns  = 20
 	defaultPostgresMaxIdleConns  = 10
-	defaultNewAPIRequestTimeout  = 11 * time.Minute
+	defaultNewAPIRequestTimeout  = 20 * time.Minute
 	defaultShutdownGracePeriod   = 30 * time.Second
 )
 

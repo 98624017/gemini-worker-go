@@ -72,6 +72,12 @@ func TestLoadFromEnvInjectsDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultNewAPIRequestTimeoutIsTwentyMinutes(t *testing.T) {
+	if defaultNewAPIRequestTimeout != 20*time.Minute {
+		t.Fatalf("defaultNewAPIRequestTimeout = %s, want %s", defaultNewAPIRequestTimeout, 20*time.Minute)
+	}
+}
+
 func TestLoadFromEnvFallsBackToDefaultsForInvalidNumbers(t *testing.T) {
 	setValidEnv(t)
 	t.Setenv("MAX_INFLIGHT_TASKS", "bad")

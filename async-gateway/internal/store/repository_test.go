@@ -181,6 +181,69 @@ func TestGetTaskByID(t *testing.T) {
 	}
 }
 
+func TestRepositoryGetTasksByIDs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty ids returns empty map", func(t *testing.T) {
+		t.Parallel()
+
+		repo, _ := newRepositoryForTest(t)
+
+		tasks, err := repo.GetTasksByIDs(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("GetTasksByIDs() error = %v", err)
+		}
+		if len(tasks) != 0 {
+			t.Fatalf("len(tasks) = %d, want 0", len(tasks))
+		}
+	})
+
+	t.Run("returns existing tasks only", func(t *testing.T) {
+		t.Parallel()
+
+		repo, mock := newRepositoryForTest(t)
+		createdAt := time.Date(2026, 3, 19, 10, 0, 0, 0, time.UTC)
+		updatedAt := createdAt.Add(5 * time.Second)
+		finishedAt := createdAt.Add(30 * time.Second)
+		summary := []byte(`{"image_urls":["https://example.com/ok.png"],"finish_reason":"STOP"}`)
+
+		rows := mock.NewRows([]string{
+			"task_id", "status", "model", "owner_hash", "request_path", "request_query",
+			"worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
+			"error_code", "error_message", "transport_uncertain", "created_at", "updated_at", "finished_at",
+		}).AddRow(
+			"task-1", "succeeded", "gemini-3-pro-image-preview", "owner", "/v1beta/models/gemini-3-pro-image-preview:generateContent", "output=url",
+			"worker-1", nil, createdAt, summary, "", "", false, createdAt, updatedAt, finishedAt,
+		)
+
+		mock.ExpectQuery(regexp.QuoteMeta(getTasksByIDsSQL)).
+			WithArgs([]string{"task-1", "task-2"}).
+			WillReturnRows(rows)
+
+		tasks, err := repo.GetTasksByIDs(context.Background(), []string{"task-1", "task-2"})
+		if err != nil {
+			t.Fatalf("GetTasksByIDs() error = %v", err)
+		}
+		if len(tasks) != 1 {
+			t.Fatalf("len(tasks) = %d, want 1", len(tasks))
+		}
+
+		task, ok := tasks["task-1"]
+		if !ok {
+			t.Fatalf("task-1 not found in result map: %#v", tasks)
+		}
+		if task.Status != domain.TaskStatusSucceeded {
+			t.Fatalf("task-1 status = %q, want %q", task.Status, domain.TaskStatusSucceeded)
+		}
+		if task.ResultSummary == nil || len(task.ResultSummary.ImageURLs) != 1 {
+			t.Fatalf("expected parsed result summary, got %#v", task.ResultSummary)
+		}
+		if _, ok := tasks["task-2"]; ok {
+			t.Fatalf("task-2 should be absent from result map: %#v", tasks)
+		}
+	})
+}
+
 func TestListTasksByOwner(t *testing.T) {
 	t.Parallel()
 

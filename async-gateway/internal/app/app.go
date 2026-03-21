@@ -86,10 +86,11 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 		server: &http.Server{
 			Addr: cfg.ListenAddr,
 			Handler: httpapi.NewRouter(logger, httpapi.Handlers{
-				SubmitTask:  submitGate,
-				GetTask:     http.HandlerFunc(queryHandler.GetTask),
-				ListTasks:   http.HandlerFunc(queryHandler.ListTasks),
-				TaskContent: http.HandlerFunc(queryHandler.TaskContent),
+				SubmitTask:    submitGate,
+				BatchGetTasks: http.HandlerFunc(queryHandler.BatchGetTasks),
+				GetTask:       http.HandlerFunc(queryHandler.GetTask),
+				ListTasks:     http.HandlerFunc(queryHandler.ListTasks),
+				TaskContent:   http.HandlerFunc(queryHandler.TaskContent),
 			}),
 			ReadHeaderTimeout: 5 * time.Second,
 		},
