@@ -33,7 +33,6 @@ func (e *inlineDataBackgroundWaitTimeoutError) Error() string {
 }
 
 type inlineDataBackgroundTask struct {
-	startedAt time.Time
 	done      chan struct{}
 	doneOnce  sync.Once
 	mime      string
@@ -111,8 +110,6 @@ func (f *inlineDataBackgroundFetcher) getOrStartTask(
 	onSuccess func(mime string, bytesData []byte),
 ) (*inlineDataBackgroundTask, error) {
 	f.mu.Lock()
-	now := time.Now()
-	f.pruneExpiredCompletedTasksLocked(now)
 	if task, ok := f.tasks[url]; ok {
 		f.mu.Unlock()
 		return task, nil
@@ -125,8 +122,7 @@ func (f *inlineDataBackgroundFetcher) getOrStartTask(
 	}
 
 	task := &inlineDataBackgroundTask{
-		startedAt: now,
-		done:      make(chan struct{}),
+		done: make(chan struct{}),
 	}
 	f.tasks[url] = task
 	f.mu.Unlock()
@@ -137,7 +133,7 @@ func (f *inlineDataBackgroundFetcher) getOrStartTask(
 				task.err = fmt.Errorf("background fetch panic: %v", r)
 			}
 			task.markDone()
-			f.scheduleTaskCleanup(url, task)
+			f.removeTaskIfCurrent(url, task)
 		}()
 
 		ctx, cancel := context.WithTimeout(context.Background(), f.totalTimeout)
@@ -149,9 +145,9 @@ func (f *inlineDataBackgroundFetcher) getOrStartTask(
 		task.err = err
 
 		if err == nil && onSuccess != nil {
-			// 先释放等待者，再做 best-effort 落盘，避免慢磁盘把成功误判成超时。
+			// 先释放等待者并从 in-flight map 移除，避免完成态结果继续占用内存。
 			task.markDone()
-			f.scheduleTaskCleanup(url, task)
+			f.removeTaskIfCurrent(url, task)
 			func() {
 				defer func() {
 					_ = recover()
@@ -196,36 +192,13 @@ func (f *inlineDataBackgroundFetcher) inflightCountLocked() int {
 	return count
 }
 
-func (f *inlineDataBackgroundFetcher) pruneExpiredCompletedTasksLocked(now time.Time) {
-	if f == nil {
-		return
-	}
-	for url, task := range f.tasks {
-		if task == nil || !task.isDone() {
-			continue
-		}
-		if now.Sub(task.startedAt) < f.totalTimeout {
-			continue
-		}
-		delete(f.tasks, url)
-	}
-}
-
-func (f *inlineDataBackgroundFetcher) scheduleTaskCleanup(url string, task *inlineDataBackgroundTask) {
+func (f *inlineDataBackgroundFetcher) removeTaskIfCurrent(url string, task *inlineDataBackgroundTask) {
 	if f == nil || task == nil {
 		return
 	}
-
-	delay := time.Until(task.startedAt.Add(f.totalTimeout))
-	if delay < 0 {
-		delay = 0
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if currentTask, ok := f.tasks[url]; ok && currentTask == task {
+		delete(f.tasks, url)
 	}
-
-	time.AfterFunc(delay, func() {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		if currentTask, ok := f.tasks[url]; ok && currentTask == task && task.isDone() {
-			delete(f.tasks, url)
-		}
-	})
 }

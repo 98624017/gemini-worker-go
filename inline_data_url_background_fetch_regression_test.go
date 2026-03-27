@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func TestFetchImageUrlAsInlineData_BackgroundBridge_ReusesCompletedResultWithoutDiskCache(t *testing.T) {
+func TestFetchImageUrlAsInlineData_BackgroundBridge_DoesNotReuseCompletedResultWithoutDiskCache(t *testing.T) {
 	rawURL := "https://example.com/slow-image.jpg"
 
 	release := make(chan struct{})
@@ -53,10 +53,10 @@ func TestFetchImageUrlAsInlineData_BackgroundBridge_ReusesCompletedResultWithout
 		t.Fatalf("expected retry after background completion to succeed, got: %v", err)
 	}
 	if fromCache {
-		t.Fatalf("expected retry without disk cache to reuse background result, got fromCache=true")
+		t.Fatalf("expected retry without disk cache to refetch, got fromCache=true")
 	}
-	if got := rt.getCallCount(); got != 1 {
-		t.Fatalf("expected completed background result to be reused without new fetch, got=%d", got)
+	if got := rt.getCallCount(); got != 2 {
+		t.Fatalf("expected completed background task to be removed and trigger a new fetch, got=%d", got)
 	}
 }
 

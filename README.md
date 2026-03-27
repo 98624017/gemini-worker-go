@@ -100,7 +100,7 @@
 
 #### `ALLOWED_PROXY_DOMAINS`（可选，逗号分隔）
 
-控制哪些 host 允许被 `/proxy/image` 代理拉取，同时也用于“Range 分块并发下载”的启用范围（仅 allowlist 内 host 会优先尝试 Range）。
+控制哪些 host 允许被 `/proxy/image` 代理拉取。
 
 格式规则：
 - `example.com`：精确匹配 host
@@ -267,6 +267,49 @@ ALLOWED_PROXY_DOMAINS="ai.kefan.cn,uguu.se,.uguu.se,.aitohumanize.com,.xuancat.c
 
 注意：内存缓存作为磁盘缓存的 **L1 前置层**，需要磁盘缓存（`INLINE_DATA_URL_CACHE_DIR`）同时配置才能生效。若磁盘缓存未配置，内存缓存设置将被忽略。
 
+### 请求侧 inlineData URL 后台抓图桥接
+
+用于优化“图片源站较慢、前台请求不想一直阻塞”的场景。
+
+行为说明：
+
+- 当前台请求等待到 `INLINE_DATA_URL_BACKGROUND_FETCH_WAIT_TIMEOUT_MS` 仍未下载完成时，会返回“图片仍在后台下载，请稍后重试”。
+- 同一个 URL 在**下载进行中**时，后续重试会复用同一个 in-flight 下载任务，避免重复向源站发起多次拉取。
+- **下载一旦完成，任务会立即从内存 map 中移除**，不再在内存中保留完成态图片 bytes。
+- 因此，**完成后的后续复用只依赖磁盘缓存**：
+  - 若已启用 `INLINE_DATA_URL_CACHE_DIR` 且落盘成功，后续请求可命中磁盘缓存
+  - 若未启用磁盘缓存，或此时尚未成功落盘，则后续请求会重新拉取源站
+
+这意味着该机制的定位是：
+
+- **进行中的下载去重**
+- **慢下载转后台继续执行**
+
+而**不是**“完成后继续把图片结果缓存到内存”。
+
+#### `INLINE_DATA_URL_BACKGROUND_FETCH_WAIT_TIMEOUT_MS`（默认跟随 `IMAGE_FETCH_TIMEOUT_MS`）
+
+前台请求愿意等待后台桥接结果的时长（毫秒）。
+
+- 超过该时间仍未完成：本次请求返回超时提示，但后台下载可继续执行
+- 仅支持正整数毫秒值
+- 未设置、非数字或 `<=0` 时，会回退到默认等待策略（优先使用 `IMAGE_FETCH_TIMEOUT_MS`，再回退到后台总超时）
+
+#### `INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS`（默认 `90000`）
+
+单个后台下载任务的总超时（毫秒）。
+
+- 超过后会放弃该后台任务
+- 该值越大，慢源站重试更容易“捡到”进行中的下载
+- 但值越大，慢任务在系统中占资源的时间也越久
+
+#### `INLINE_DATA_URL_BACKGROUND_FETCH_MAX_INFLIGHT`（默认 `128`）
+
+允许同时存在的后台下载任务上限。
+
+- 达到上限后，新请求不会进入后台桥接，而是回退到原始直连下载逻辑
+- 如果你的目标是压低内存和并发压力，建议把它显著调小，例如 `8` 或 `16`
+
 #### `IMAGE_TLS_HANDSHAKE_TIMEOUT_MS`（默认 `15000`）
 
 抓取图片时的 TLS 握手超时（毫秒）。当遇到公网 OSS/CDN 偶发慢握手时，可适当增大该值以减少 502。
@@ -309,13 +352,6 @@ IMAGE_FETCH_EXTERNAL_PROXY_DOMAINS=".oss-cn-hangzhou.aliyuncs.com"
 #### `UPLOAD_INSECURE_SKIP_VERIFY`（默认关闭）
 
 是否对“图床上传”跳过 TLS 证书校验（`InsecureSkipVerify`）。同样不建议开启，除非你非常清楚风险与边界。
-
-## Range 分块并发下载说明
-
-当服务需要把图片 URL 拉取为完整 bytes（用于 Base64 编码或图床上传）时：
-
-- 若图片 host 命中 `ALLOWED_PROXY_DOMAINS`：优先尝试 HTTP Range 分块并发下载（并发固定为 4）
-- 若上游不支持 Range 或分块失败：自动回退为单连接 GET
 
 ## 快速运行（示例）
 

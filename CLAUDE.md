@@ -65,12 +65,12 @@ handleGenerateContent / handleStreamGenerateContent
 - **`App`**：持有所有依赖（Config、HTTP 客户端、InlineDataURLCache、InlineDataURLBackgroundFetcher、AdminLogs）
 - **`Config`**：从环境变量读取，含网络超时、TLS 开关、域名 allowlist 等所有旋钮
 - **`inlineDataURLDiskCache`**：`SHA256(url)` 为 key，`{key}.data` + `{key}.meta.json` 为存储格式；使用 `inflightGroup`（singleflight 模式）防止并发穿透
-- **`inlineDataBackgroundFetcher`**：前台 ImageFetchTimeout 超时后将下载任务移交后台，下次重试时等待同一 in-flight task，成功后写磁盘缓存
+- **`inlineDataBackgroundFetcher`**：前台等待超时后将下载任务移交后台；仅复用进行中的同 URL 下载任务；成功后写磁盘缓存，完成即从内存 map 移除
 
 ### 关键设计决策
 
 1. **fail-open**：图床上传失败、代理 URL 构建失败均回退而非 5xx，保证主链路可用
-2. **Range 分块下载**：仅对 `ALLOWED_PROXY_DOMAINS` 内的 host 尝试 4 并发分块，失败自动回退单连接
+2. **后台抓图桥接**：仅对进行中的同 URL 下载做去重；完成态结果不继续保留在内存，后续复用只依赖磁盘缓存
 3. **双上游路由**：token 格式 `url1|key1,url2|key2`，仅当 `imageConfig.imageSize` 为 `4k/4K` 时切换到第二上游
 4. **管理后台默认关闭**：`ADMIN_PASSWORD` 为空时 `/admin/*` 返回 404，Base64 图片在日志中自动省略
 
