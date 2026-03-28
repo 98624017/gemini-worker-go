@@ -25,6 +25,10 @@ WORKDIR /root/
 # Install CA certificates for HTTPS requests (essential for Gemini/Image fetching)
 RUN apk --no-cache add ca-certificates
 
+LABEL org.opencontainers.image.source="https://github.com/98624017/gemini-worker-go" \
+      org.opencontainers.image.title="gemini-worker-go" \
+      org.opencontainers.image.description="Gemini-compatible Go proxy with upstream forwarding, inlineData URL conversion, and output=url handling"
+
 # Copy the Pre-built binary from the previous stage
 COPY --from=builder /app/gemini-worker-go .
 

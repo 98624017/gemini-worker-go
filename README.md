@@ -381,3 +381,24 @@ docker run --rm -p 8787:8787 \
   -v /data/inline-data-url-cache:/tmp/inline-data-url-cache \
   gemini-worker-go
 ```
+
+### GHCR 公开镜像
+
+仓库已提供根目录主服务的 GHCR 发布工作流：
+
+- Workflow：`.github/workflows/gemini-worker-go-ghcr.yml`
+- 镜像名：`ghcr.io/98624017/gemini-worker-go`
+- 常用 tag：
+  - `main`
+  - `sha-<commit>`
+  - `vX.Y.Z` / `X.Y.Z` / `X.Y` / `X`
+  - `latest`（仅在推送 `v*` tag 时生成）
+
+触发方式：
+
+- push 到 `main` 且命中根目录服务相关文件
+- push `v*` tag
+- 手动触发 `workflow_dispatch`
+
+首次发布到 GHCR 后，如果包默认还是私有，需要在 GitHub Packages 页面将
+`gemini-worker-go` 的 visibility 手动切为 `Public`。
