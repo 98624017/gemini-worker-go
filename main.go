@@ -6,9 +6,9 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
-	jsoniter "github.com/json-iterator/go"
 	"errors"
 	"fmt"
+	jsoniter "github.com/json-iterator/go"
 	"io"
 	"log"
 	"mime/multipart"
@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -133,6 +134,7 @@ type App struct {
 	UploadClient                   *http.Client
 	InlineDataURLCache             *inlineDataURLDiskCache
 	InlineDataURLBackgroundFetcher *inlineDataBackgroundFetcher
+	MemoryController               *memoryReliefController
 	AdminLogs                      *adminLogBuffer
 	AdminStats                     *adminStats
 }
@@ -157,7 +159,14 @@ func newBaseTransport() *http.Transport {
 }
 
 func parseDurationMsEnv(key string, defaultValue time.Duration) time.Duration {
-	raw := strings.TrimSpace(os.Getenv(key))
+	return parseDurationMsEnvWith(os.Getenv, key, defaultValue)
+}
+
+func parseDurationMsEnvWith(getenv func(string) string, key string, defaultValue time.Duration) time.Duration {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	raw := strings.TrimSpace(getenv(key))
 	if raw == "" {
 		return defaultValue
 	}
@@ -169,7 +178,14 @@ func parseDurationMsEnv(key string, defaultValue time.Duration) time.Duration {
 }
 
 func parseCommaSeparatedEnv(key string) []string {
-	raw := strings.TrimSpace(os.Getenv(key))
+	return parseCommaSeparatedEnvWith(os.Getenv, key)
+}
+
+func parseCommaSeparatedEnvWith(getenv func(string) string, key string) []string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	raw := strings.TrimSpace(getenv(key))
 	if raw == "" {
 		return nil
 	}
@@ -224,11 +240,18 @@ func applyTLSOptionsToTransport(t *http.Transport, tlsHandshakeTimeout time.Dura
 }
 
 func loadConfig() Config {
+	return loadConfigWithEnv(os.Getenv, detectContainerMemoryLimitBytes())
+}
+
+func loadConfigWithEnv(getenv func(string) string, containerLimitBytes int64) Config {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
 	cfg := Config{
-		UpstreamBaseURL: os.Getenv("UPSTREAM_BASE_URL"),
-		UpstreamAPIKey:  os.Getenv("UPSTREAM_API_KEY"),
-		PublicBaseURL:   os.Getenv("PUBLIC_BASE_URL"),
-		Port:            os.Getenv("PORT"),
+		UpstreamBaseURL: getenv("UPSTREAM_BASE_URL"),
+		UpstreamAPIKey:  getenv("UPSTREAM_API_KEY"),
+		PublicBaseURL:   getenv("PUBLIC_BASE_URL"),
+		Port:            getenv("PORT"),
 	}
 	if cfg.UpstreamBaseURL == "" {
 		cfg.UpstreamBaseURL = DefaultUpstreamBaseURL
@@ -240,7 +263,7 @@ func loadConfig() Config {
 	}
 
 	// Allowed Proxy Domains
-	if allowed := parseCommaSeparatedEnv("ALLOWED_PROXY_DOMAINS"); len(allowed) > 0 {
+	if allowed := parseCommaSeparatedEnvWith(getenv, "ALLOWED_PROXY_DOMAINS"); len(allowed) > 0 {
 		cfg.AllowedDomains = allowed
 	} else {
 		// Default Allowed Domains
@@ -253,12 +276,12 @@ func loadConfig() Config {
 	}
 
 	// External image fetch proxy domains (optional; empty => disabled)
-	cfg.ImageFetchExternalProxyDomains = parseCommaSeparatedEnv("IMAGE_FETCH_EXTERNAL_PROXY_DOMAINS")
+	cfg.ImageFetchExternalProxyDomains = parseCommaSeparatedEnvWith(getenv, "IMAGE_FETCH_EXTERNAL_PROXY_DOMAINS")
 
 	// Slow log threshold (ms). Default: 100s
 	// Set SLOW_LOG_THRESHOLD_MS=0 or negative to disable slow logs.
 	cfg.SlowLogThreshold = 100 * time.Second
-	if raw := strings.TrimSpace(os.Getenv("SLOW_LOG_THRESHOLD_MS")); raw != "" {
+	if raw := strings.TrimSpace(getenv("SLOW_LOG_THRESHOLD_MS")); raw != "" {
 		if ms, err := strconv.Atoi(raw); err == nil {
 			if ms <= 0 {
 				cfg.SlowLogThreshold = 0
@@ -269,30 +292,30 @@ func loadConfig() Config {
 	}
 
 	// Proxy wrapper toggles (default enabled to keep current behavior)
-	cfg.ProxyStandardOutputURLs = parseBoolEnv("PROXY_STANDARD_OUTPUT_URLS", true)
-	cfg.ProxySpecialUpstreamURLs = parseBoolEnv("PROXY_SPECIAL_UPSTREAM_URLS", true)
+	cfg.ProxyStandardOutputURLs = parseBoolEnvWith(getenv, "PROXY_STANDARD_OUTPUT_URLS", true)
+	cfg.ProxySpecialUpstreamURLs = parseBoolEnvWith(getenv, "PROXY_SPECIAL_UPSTREAM_URLS", true)
 
-	cfg.AdminPassword = strings.TrimSpace(os.Getenv("ADMIN_PASSWORD"))
+	cfg.AdminPassword = strings.TrimSpace(getenv("ADMIN_PASSWORD"))
 	if isDisabledValue(cfg.AdminPassword) {
 		cfg.AdminPassword = ""
 	}
 
 	// Image fetch / upload networking knobs
-	cfg.ImageFetchTimeout = parseDurationMsEnv("IMAGE_FETCH_TIMEOUT_MS", ImageFetchTimeout)
-	cfg.UploadTimeout = parseDurationMsEnv("UPLOAD_TIMEOUT_MS", UploadTimeout)
-	cfg.ImageTLSHandshakeTimeout = parseDurationMsEnv("IMAGE_TLS_HANDSHAKE_TIMEOUT_MS", DefaultImageTLSHandshakeTimeout)
-	cfg.UploadTLSHandshakeTimeout = parseDurationMsEnv("UPLOAD_TLS_HANDSHAKE_TIMEOUT_MS", DefaultUploadTLSHandshakeTimeout)
-	cfg.ImageFetchInsecureSkipVerify = parseBoolEnv("IMAGE_FETCH_INSECURE_SKIP_VERIFY", false)
-	cfg.UploadInsecureSkipVerify = parseBoolEnv("UPLOAD_INSECURE_SKIP_VERIFY", false)
+	cfg.ImageFetchTimeout = parseDurationMsEnvWith(getenv, "IMAGE_FETCH_TIMEOUT_MS", ImageFetchTimeout)
+	cfg.UploadTimeout = parseDurationMsEnvWith(getenv, "UPLOAD_TIMEOUT_MS", UploadTimeout)
+	cfg.ImageTLSHandshakeTimeout = parseDurationMsEnvWith(getenv, "IMAGE_TLS_HANDSHAKE_TIMEOUT_MS", DefaultImageTLSHandshakeTimeout)
+	cfg.UploadTLSHandshakeTimeout = parseDurationMsEnvWith(getenv, "UPLOAD_TLS_HANDSHAKE_TIMEOUT_MS", DefaultUploadTLSHandshakeTimeout)
+	cfg.ImageFetchInsecureSkipVerify = parseBoolEnvWith(getenv, "IMAGE_FETCH_INSECURE_SKIP_VERIFY", false)
+	cfg.UploadInsecureSkipVerify = parseBoolEnvWith(getenv, "UPLOAD_INSECURE_SKIP_VERIFY", false)
 
 	// Request-side inlineData URL disk cache (disabled by default)
-	cfg.InlineDataURLCacheDir = strings.TrimSpace(os.Getenv("INLINE_DATA_URL_CACHE_DIR"))
+	cfg.InlineDataURLCacheDir = strings.TrimSpace(getenv("INLINE_DATA_URL_CACHE_DIR"))
 	if isDisabledValue(cfg.InlineDataURLCacheDir) {
 		cfg.InlineDataURLCacheDir = ""
 	}
 
 	cfg.InlineDataURLCacheTTL = 1 * time.Hour
-	if raw := strings.TrimSpace(os.Getenv("INLINE_DATA_URL_CACHE_TTL_MS")); raw != "" {
+	if raw := strings.TrimSpace(getenv("INLINE_DATA_URL_CACHE_TTL_MS")); raw != "" {
 		if ms, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			if ms <= 0 {
 				cfg.InlineDataURLCacheTTL = 0
@@ -303,7 +326,7 @@ func loadConfig() Config {
 	}
 
 	cfg.InlineDataURLCacheMaxBytes = 1 << 30 // 1GiB
-	if raw := strings.TrimSpace(os.Getenv("INLINE_DATA_URL_CACHE_MAX_BYTES")); raw != "" {
+	if raw := strings.TrimSpace(getenv("INLINE_DATA_URL_CACHE_MAX_BYTES")); raw != "" {
 		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			if v <= 0 {
 				cfg.InlineDataURLCacheMaxBytes = 0
@@ -313,9 +336,9 @@ func loadConfig() Config {
 		}
 	}
 
-	// L1 memory cache for inlineData URL fetches (default 100MiB).
-	cfg.InlineDataURLMemCacheMaxBytes = 100 * 1024 * 1024 // 100MiB default
-	if raw := strings.TrimSpace(os.Getenv("INLINE_DATA_URL_MEMORY_CACHE_MAX_BYTES")); raw != "" {
+	// L1 memory cache for inlineData URL fetches.
+	cfg.InlineDataURLMemCacheMaxBytes = autoInlineDataMemCacheMaxBytes(containerLimitBytes)
+	if raw := strings.TrimSpace(getenv("INLINE_DATA_URL_MEMORY_CACHE_MAX_BYTES")); raw != "" {
 		if isDisabledValue(raw) {
 			cfg.InlineDataURLMemCacheMaxBytes = 0
 		} else if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
@@ -329,7 +352,7 @@ func loadConfig() Config {
 
 	// Background fetch bridge for slow inlineData URL downloads.
 	cfg.InlineDataURLBackgroundFetchWaitTimeout = cfg.ImageFetchTimeout
-	if raw := strings.TrimSpace(os.Getenv("INLINE_DATA_URL_BACKGROUND_FETCH_WAIT_TIMEOUT_MS")); raw != "" {
+	if raw := strings.TrimSpace(getenv("INLINE_DATA_URL_BACKGROUND_FETCH_WAIT_TIMEOUT_MS")); raw != "" {
 		if ms, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			if ms <= 0 {
 				cfg.InlineDataURLBackgroundFetchWaitTimeout = 0
@@ -340,7 +363,7 @@ func loadConfig() Config {
 	}
 
 	cfg.InlineDataURLBackgroundFetchTotalTimeout = 90 * time.Second
-	if raw := strings.TrimSpace(os.Getenv("INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS")); raw != "" {
+	if raw := strings.TrimSpace(getenv("INLINE_DATA_URL_BACKGROUND_FETCH_TOTAL_TIMEOUT_MS")); raw != "" {
 		if ms, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			if ms <= 0 {
 				cfg.InlineDataURLBackgroundFetchTotalTimeout = 0
@@ -351,7 +374,7 @@ func loadConfig() Config {
 	}
 
 	cfg.InlineDataURLBackgroundFetchMaxInflight = 128
-	if raw := strings.TrimSpace(os.Getenv("INLINE_DATA_URL_BACKGROUND_FETCH_MAX_INFLIGHT")); raw != "" {
+	if raw := strings.TrimSpace(getenv("INLINE_DATA_URL_BACKGROUND_FETCH_MAX_INFLIGHT")); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil {
 			if n <= 0 {
 				cfg.InlineDataURLBackgroundFetchMaxInflight = 0
@@ -383,7 +406,14 @@ func isNumeric(s string) bool {
 }
 
 func parseBoolEnv(key string, defaultValue bool) bool {
-	raw := strings.TrimSpace(os.Getenv(key))
+	return parseBoolEnvWith(os.Getenv, key, defaultValue)
+}
+
+func parseBoolEnvWith(getenv func(string) string, key string, defaultValue bool) bool {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	raw := strings.TrimSpace(getenv(key))
 	if raw == "" {
 		return defaultValue
 	}
@@ -398,7 +428,9 @@ func parseBoolEnv(key string, defaultValue bool) bool {
 }
 
 func main() {
-	cfg := loadConfig()
+	containerLimitBytes := detectContainerMemoryLimitBytes()
+	runtimeTuning := configureRuntimeMemory(os.Getenv, containerLimitBytes, debug.SetGCPercent, debug.SetMemoryLimit)
+	cfg := loadConfigWithEnv(os.Getenv, containerLimitBytes)
 	baseTransport := newBaseTransport()
 	upstreamTransport := baseTransport.Clone()
 	imageTransport := baseTransport.Clone()
@@ -436,6 +468,7 @@ func main() {
 			Timeout:   cfg.UploadTimeout,
 			Transport: uploadTransport,
 		},
+		MemoryController: newMemoryReliefController(),
 	}
 
 	if cfg.InlineDataURLCacheDir != "" && cfg.InlineDataURLCacheTTL > 0 && cfg.InlineDataURLCacheMaxBytes > 0 {
@@ -510,6 +543,12 @@ func main() {
 		}
 	} else {
 		log.Printf("InlineData URL Cache: disabled")
+	}
+	if runtimeTuning.AutoMemoryLimit {
+		log.Printf("Go Runtime Memory Limit: auto=%d bytes (container=%d bytes)", runtimeTuning.MemoryLimitBytes, runtimeTuning.ContainerLimitBytes)
+	}
+	if runtimeTuning.AutoGCPercent {
+		log.Printf("Go Runtime GC Percent: auto=%d", runtimeTuning.GCPercent)
 	}
 	if app.InlineDataURLBackgroundFetcher != nil {
 		log.Printf(
@@ -801,6 +840,8 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 	if adminEntry != nil {
 		adminEntry.RequestUpstream, adminEntry.RequestUpstreamImgs = sanitizeJSONForAdminLog(newBodyBytes)
 	}
+	bodyBytes = nil
+	bodyMap = nil
 
 	// Construct Upstream URL
 	targetPath := r.URL.Path
@@ -838,6 +879,8 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 	}
 	defer resp.Body.Close()
 	upstreamHeaderDur := time.Since(upstreamStart)
+	newBodyBytes = nil
+	req = nil
 
 	// 7. Handle Response
 	respHandleStart := time.Now()
@@ -857,6 +900,7 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 
 func (app *App) handleNonStreamResponse(w http.ResponseWriter, resp *http.Response, outputMode string, req *http.Request, adminEntry *adminLogEntry) {
 	start := time.Now()
+	defer app.maybeRelieveMemory()
 
 	readStart := time.Now()
 	respBody, err := io.ReadAll(resp.Body)
@@ -896,6 +940,7 @@ func (app *App) handleNonStreamResponse(w http.ResponseWriter, resp *http.Respon
 		}
 		return
 	}
+	respBody = nil
 	unmarshalDur := time.Since(unmarshalStart)
 
 	// Remove thought signature
@@ -932,6 +977,7 @@ func (app *App) handleNonStreamResponse(w http.ResponseWriter, resp *http.Respon
 	if marshalErr != nil {
 		log.Printf("[marshalJSON] failed to marshal response body: %v", marshalErr)
 	}
+	jsonBody = nil
 	marshalDur := time.Since(marshalStart)
 
 	writeStart := time.Now()
@@ -952,6 +998,7 @@ func (app *App) handleNonStreamResponse(w http.ResponseWriter, resp *http.Respon
 }
 
 func (app *App) handleStreamResponse(w http.ResponseWriter, resp *http.Response, outputMode string, req *http.Request, adminEntry *adminLogEntry) {
+	defer app.maybeRelieveMemory()
 	// SSE Header
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1055,6 +1102,7 @@ func (app *App) handleStreamResponse(w http.ResponseWriter, resp *http.Response,
 			}
 		}
 	}
+	lastDataJSON = nil
 }
 
 // extractFinishReasonFromMap returns the finishReason of the first candidate
@@ -1481,6 +1529,7 @@ func (app *App) convertInlineDataBase64ToUrlInResponse(root interface{}, r *http
 	}
 
 	start := time.Now()
+	uniqueRefs := len(tasksByData)
 
 	maxConcurrent := MaxConcurrentInlineDataFetches
 	if maxConcurrent < 1 {
@@ -1509,6 +1558,7 @@ func (app *App) convertInlineDataBase64ToUrlInResponse(root interface{}, r *http
 				errCh <- err
 				return
 			}
+			imageBytes = nil
 
 			finalURL := urlStr
 			if app.Config.ProxyStandardOutputURLs {
@@ -1530,9 +1580,11 @@ func (app *App) convertInlineDataBase64ToUrlInResponse(root interface{}, r *http
 		}
 	}
 
+	tasksByData = nil
 	dur := time.Since(start)
+	app.maybeRelieveMemory()
 	if dur > 5*time.Second {
-		log.Printf("[InlineData->URL] refs=%d unique=%d dur=%v", totalRefs, len(tasksByData), dur)
+		log.Printf("[InlineData->URL] refs=%d unique=%d dur=%v", totalRefs, uniqueRefs, dur)
 	}
 
 	return firstErr
@@ -1800,26 +1852,12 @@ func (app *App) uploadImageBytesToUrl(data []byte, mimeType string) (string, err
 }
 
 func (app *App) uploadToUguu(data []byte, mimeType string) (string, error) {
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
-
 	ext := extensionFromMime(mimeType)
-	part, err := writer.CreateFormFile("files[]", "image"+ext)
+	req, contentType, err := newStreamingMultipartUploadRequest("https://uguu.se/upload", "files[]", "image"+ext, data)
 	if err != nil {
 		return "", err
 	}
-	if _, err := part.Write(data); err != nil {
-		return "", err
-	}
-	if err := writer.Close(); err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequest("POST", "https://uguu.se/upload", body)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("User-Agent", UploadUserAgent)
 	req.Header.Set("Accept", "application/json")
 
@@ -1851,19 +1889,12 @@ func (app *App) uploadToUguu(data []byte, mimeType string) (string, error) {
 }
 
 func (app *App) uploadToKefan(data []byte, mimeType string) (string, error) {
-	// Similar to X0 but different endpoint/parsing
-	// Implementation omitted for brevity in this first pass, sticking to X0 for now as it's the primary
-	// Wait, user uses both. I should try to implement both.
-
-	body := &bytes.Buffer{}
-	writer := multipart.NewWriter(body)
 	ext := extensionFromMime(mimeType)
-	part, _ := writer.CreateFormFile("file", "image"+ext)
-	part.Write(data)
-	writer.Close()
-
-	req, _ := http.NewRequest("POST", "https://ai.kefan.cn/api/upload/local", body)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req, contentType, err := newStreamingMultipartUploadRequest("https://ai.kefan.cn/api/upload/local", "file", "image"+ext, data)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("User-Agent", UploadUserAgent)
 
 	resp, err := app.UploadClient.Do(req)
@@ -1884,6 +1915,41 @@ func (app *App) uploadToKefan(data []byte, mimeType string) (string, error) {
 		return "", fmt.Errorf("kefan failed: %s", string(respBytes))
 	}
 	return resObj.Data, nil
+}
+
+func newStreamingMultipartUploadRequest(targetURL, fieldName, fileName string, data []byte) (*http.Request, string, error) {
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+	contentType := writer.FormDataContentType()
+
+	req, err := http.NewRequest(http.MethodPost, targetURL, pr)
+	if err != nil {
+		_ = pw.Close()
+		return nil, "", err
+	}
+
+	go func() {
+		var pipeErr error
+		defer func() {
+			closeErr := writer.Close()
+			if pipeErr == nil {
+				pipeErr = closeErr
+			}
+			_ = pw.CloseWithError(pipeErr)
+		}()
+
+		part, err := writer.CreateFormFile(fieldName, fileName)
+		if err != nil {
+			pipeErr = err
+			return
+		}
+		if _, err := part.Write(data); err != nil {
+			pipeErr = err
+			return
+		}
+	}()
+
+	return req, contentType, nil
 }
 
 // --- Helpers ---
