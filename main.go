@@ -493,7 +493,10 @@ func parseBoolEnvWith(getenv func(string) string, key string, defaultValue bool)
 func main() {
 	containerLimitBytes := detectContainerMemoryLimitBytes()
 	runtimeTuning := configureRuntimeMemory(os.Getenv, containerLimitBytes, debug.SetGCPercent, debug.SetMemoryLimit)
-	cfg := loadConfigWithEnv(os.Getenv, containerLimitBytes)
+	cfg, err := loadConfigWithEnvValidated(os.Getenv, containerLimitBytes)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
 	baseTransport := newBaseTransport()
 	upstreamTransport := baseTransport.Clone()
 	imageTransport := baseTransport.Clone()
