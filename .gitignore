@@ -17,6 +17,11 @@ response.json
 *.log
 *.pid
 
+# Local environment secrets
+.env
+.env.*
+!.env.example
+
 # Go test cache
 /tmp/
 
