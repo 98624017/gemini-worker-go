@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -101,6 +103,67 @@ func TestUploadImageBytesToURL_R2ThenLegacyFallsBack(t *testing.T) {
 	}
 	if got.Provider != "legacy" {
 		t.Fatalf("Provider=%q want legacy", got.Provider)
+	}
+}
+
+func TestBuildR2ObjectKey_UsesDatePrefixAndExtension(t *testing.T) {
+	now := time.Date(2026, 3, 31, 10, 20, 30, 123*int(time.Millisecond), time.UTC)
+	got := buildR2ObjectKey("images", "image/png", now, "abcd1234")
+	want := fmt.Sprintf("images/2026/03/31/%d-abcd1234.png", now.UnixMilli())
+	if got != want {
+		t.Fatalf("buildR2ObjectKey()=%q want %q", got, want)
+	}
+}
+
+func TestUploadToR2_ReturnsPublicURL(t *testing.T) {
+	now := time.Date(2026, 3, 31, 10, 20, 30, 123*int(time.Millisecond), time.UTC)
+	expectedKey := fmt.Sprintf("images/2026/03/31/%d-test.png", now.UnixMilli())
+
+	var putKey string
+	var putBody []byte
+	var putMimeType string
+
+	app := &App{
+		Config: Config{
+			R2ObjectPrefix:  "images",
+			R2PublicBaseURL: "https://img.example.com/",
+			UploadTimeout:   2 * time.Second,
+		},
+		nowFunc: func() time.Time {
+			return now
+		},
+		randomHexFunc: func(n int) (string, error) {
+			if n != 4 {
+				t.Fatalf("randomHex size=%d want 4", n)
+			}
+			return "test", nil
+		},
+		r2PutObjectFunc: func(ctx context.Context, key string, body []byte, mimeType string) error {
+			putKey = key
+			putBody = append([]byte(nil), body...)
+			putMimeType = mimeType
+			return nil
+		},
+	}
+
+	got, err := app.uploadToR2([]byte("png-bytes"), "image/png")
+	if err != nil {
+		t.Fatalf("uploadToR2 returned error: %v", err)
+	}
+	if putKey != expectedKey {
+		t.Fatalf("put key=%q want %q", putKey, expectedKey)
+	}
+	if string(putBody) != "png-bytes" {
+		t.Fatalf("put body=%q want %q", string(putBody), "png-bytes")
+	}
+	if putMimeType != "image/png" {
+		t.Fatalf("put mimeType=%q want image/png", putMimeType)
+	}
+	if got.URL != "https://img.example.com/"+expectedKey {
+		t.Fatalf("result url=%q want %q", got.URL, "https://img.example.com/"+expectedKey)
+	}
+	if got.Provider != "r2" {
+		t.Fatalf("result provider=%q want r2", got.Provider)
 	}
 }
 

@@ -4,8 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	jsoniter "github.com/json-iterator/go"
@@ -146,6 +150,9 @@ type App struct {
 	AdminStats                     *adminStats
 	legacyUploadFunc               func(data []byte, mimeType string) (uploadResult, error)
 	r2UploadFunc                   func(data []byte, mimeType string) (uploadResult, error)
+	r2PutObjectFunc                func(ctx context.Context, key string, body []byte, mimeType string) error
+	nowFunc                        func() time.Time
+	randomHexFunc                  func(n int) (string, error)
 }
 
 type uploadResult struct {
@@ -542,6 +549,14 @@ func main() {
 			Transport: uploadTransport,
 		},
 		MemoryController: newMemoryReliefController(),
+	}
+
+	if cfg.ImageHostMode != "legacy" {
+		putObjectFunc, err := newR2PutObjectFunc(cfg, app.UploadClient)
+		if err != nil {
+			log.Fatalf("init r2 uploader: %v", err)
+		}
+		app.r2PutObjectFunc = putObjectFunc
 	}
 
 	if cfg.InlineDataURLCacheDir != "" && cfg.InlineDataURLCacheTTL > 0 && cfg.InlineDataURLCacheMaxBytes > 0 {
@@ -1939,7 +1954,209 @@ func (app *App) callR2Uploader(data []byte, mimeType string) (uploadResult, erro
 	if app.r2UploadFunc != nil {
 		return app.r2UploadFunc(data, mimeType)
 	}
-	return uploadResult{}, errors.New("r2 uploader is not configured")
+	return app.uploadToR2(data, mimeType)
+}
+
+func (app *App) now() time.Time {
+	if app != nil && app.nowFunc != nil {
+		return app.nowFunc().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (app *App) randomHex(n int) (string, error) {
+	if app != nil && app.randomHexFunc != nil {
+		return app.randomHexFunc(n)
+	}
+	if n <= 0 {
+		return "", errors.New("random hex size must be positive")
+	}
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func buildR2ObjectKey(prefix, mimeType string, now time.Time, randHex string) string {
+	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+	if prefix == "" {
+		prefix = "images"
+	}
+	ext := strings.TrimPrefix(extensionFromMime(mimeType), ".")
+	if ext == "" {
+		ext = "bin"
+	}
+	now = now.UTC()
+	return fmt.Sprintf("%s/%04d/%02d/%02d/%d-%s.%s",
+		prefix, now.Year(), now.Month(), now.Day(), now.UnixMilli(), randHex, ext)
+}
+
+func (app *App) uploadToR2(data []byte, mimeType string) (uploadResult, error) {
+	if app == nil || app.r2PutObjectFunc == nil {
+		return uploadResult{}, errors.New("r2 uploader is not configured")
+	}
+	randHex, err := app.randomHex(4)
+	if err != nil {
+		return uploadResult{}, err
+	}
+	key := buildR2ObjectKey(app.Config.R2ObjectPrefix, mimeType, app.now(), randHex)
+
+	timeout := app.Config.UploadTimeout
+	if timeout <= 0 {
+		timeout = UploadTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if err := app.r2PutObjectFunc(ctx, key, data, mimeType); err != nil {
+		return uploadResult{}, err
+	}
+	publicBaseURL := strings.TrimRight(strings.TrimSpace(app.Config.R2PublicBaseURL), "/")
+	return uploadResult{
+		URL:      publicBaseURL + "/" + key,
+		Provider: "r2",
+	}, nil
+}
+
+func newR2PutObjectFunc(cfg Config, httpClient *http.Client) (func(ctx context.Context, key string, body []byte, mimeType string) error, error) {
+	endpoint, err := parseR2Endpoint(cfg.R2Endpoint)
+	if err != nil {
+		return nil, err
+	}
+	client := httpClient
+	if client == nil {
+		client = &http.Client{Timeout: UploadTimeout}
+	}
+	return func(ctx context.Context, key string, body []byte, mimeType string) error {
+		return putObjectToR2(ctx, client, endpoint, cfg.R2Bucket, cfg.R2AccessKeyID, cfg.R2SecretAccessKey, key, body, mimeType)
+	}, nil
+}
+
+func parseR2Endpoint(raw string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, errors.New("R2_ENDPOINT is empty")
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("parse R2_ENDPOINT: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, errors.New("R2_ENDPOINT must use http or https")
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return nil, errors.New("R2_ENDPOINT host is empty")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	return parsed, nil
+}
+
+func putObjectToR2(ctx context.Context, client *http.Client, endpoint *url.URL, bucket, accessKeyID, secretAccessKey, key string, body []byte, mimeType string) error {
+	if client == nil {
+		return errors.New("r2 http client is nil")
+	}
+	if strings.TrimSpace(mimeType) == "" {
+		mimeType = "application/octet-stream"
+	}
+	now := time.Now().UTC()
+	amzDate := now.Format("20060102T150405Z")
+	dateStamp := now.Format("20060102")
+	payloadHash := sha256Hex(body)
+	objectURL, canonicalURI := buildR2ObjectURL(endpoint, bucket, key)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, objectURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mimeType)
+	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+	req.Header.Set("X-Amz-Date", amzDate)
+
+	canonicalHeaders := strings.Join([]string{
+		"content-type:" + mimeType,
+		"host:" + req.URL.Host,
+		"x-amz-content-sha256:" + payloadHash,
+		"x-amz-date:" + amzDate,
+		"",
+	}, "\n")
+	signedHeaders := "content-type;host;x-amz-content-sha256;x-amz-date"
+	canonicalRequest := strings.Join([]string{
+		http.MethodPut,
+		canonicalURI,
+		"",
+		canonicalHeaders,
+		signedHeaders,
+		payloadHash,
+	}, "\n")
+
+	credentialScope := dateStamp + "/auto/s3/aws4_request"
+	stringToSign := strings.Join([]string{
+		"AWS4-HMAC-SHA256",
+		amzDate,
+		credentialScope,
+		sha256Hex([]byte(canonicalRequest)),
+	}, "\n")
+	signingKey := deriveAWSV4SigningKey(secretAccessKey, dateStamp, "auto", "s3")
+	signature := hex.EncodeToString(hmacSHA256(signingKey, stringToSign))
+	req.Header.Set("Authorization", fmt.Sprintf(
+		"AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
+		accessKeyID,
+		credentialScope,
+		signedHeaders,
+		signature,
+	))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return fmt.Errorf("r2 put object failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+}
+
+func buildR2ObjectURL(endpoint *url.URL, bucket, key string) (objectURL string, canonicalURI string) {
+	bucket = strings.TrimSpace(bucket)
+	key = strings.TrimLeft(strings.TrimSpace(key), "/")
+	plainPath := "/" + bucket + "/" + key
+	canonicalURI = "/" + pathEscapePreservingSlashes(bucket) + "/" + pathEscapePreservingSlashes(key)
+	urlCopy := *endpoint
+	urlCopy.Path = strings.TrimRight(endpoint.Path, "/") + plainPath
+	urlCopy.RawPath = strings.TrimRight(endpoint.RawPath, "/") + canonicalURI
+	return urlCopy.String(), canonicalURI
+}
+
+func pathEscapePreservingSlashes(v string) string {
+	if v == "" {
+		return ""
+	}
+	parts := strings.Split(v, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+func sha256Hex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func hmacSHA256(key []byte, data string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(data))
+	return mac.Sum(nil)
+}
+
+func deriveAWSV4SigningKey(secretAccessKey, dateStamp, region, service string) []byte {
+	kDate := hmacSHA256([]byte("AWS4"+secretAccessKey), dateStamp)
+	kRegion := hmacSHA256(kDate, region)
+	kService := hmacSHA256(kRegion, service)
+	return hmacSHA256(kService, "aws4_request")
 }
 
 func (app *App) uploadImageBytesToUrl(data []byte, mimeType string) (string, error) {
