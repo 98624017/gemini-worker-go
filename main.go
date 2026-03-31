@@ -1641,16 +1641,16 @@ func (app *App) convertInlineDataBase64ToUrlInResponse(root interface{}, r *http
 				return
 			}
 
-			urlStr, err := app.uploadImageBytesToUrl(imageBytes, key.mimeType)
+			uploadRes, err := app.uploadImageBytesToURL(imageBytes, key.mimeType)
 			if err != nil {
 				errCh <- err
 				return
 			}
 			imageBytes = nil
 
-			finalURL := urlStr
-			if app.Config.ProxyStandardOutputURLs {
-				finalURL = app.maybeWrapProxyUrl(r, urlStr)
+			finalURL := uploadRes.URL
+			if uploadRes.Provider == "legacy" && app.Config.ProxyStandardOutputURLs {
+				finalURL = app.maybeWrapProxyUrl(r, uploadRes.URL)
 			}
 			for _, inlineData := range targets {
 				inlineData["data"] = finalURL

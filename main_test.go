@@ -167,6 +167,103 @@ func TestUploadToR2_ReturnsPublicURL(t *testing.T) {
 	}
 }
 
+func TestConvertInlineDataBase64ToUrlInResponse_R2ResultSkipsProxyWrap(t *testing.T) {
+	root := map[string]interface{}{
+		"candidates": []interface{}{
+			map[string]interface{}{
+				"content": map[string]interface{}{
+					"parts": []interface{}{
+						map[string]interface{}{
+							"inlineData": map[string]interface{}{
+								"mimeType": "image/png",
+								"data":     base64.StdEncoding.EncodeToString([]byte("hello")),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	app := &App{
+		Config: Config{
+			ImageHostMode:           "r2",
+			PublicBaseURL:           "https://proxy.example.com",
+			ProxyStandardOutputURLs: true,
+		},
+		r2UploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			return uploadResult{
+				URL:      "https://img.example.com/images/2026/03/31/a.png",
+				Provider: "r2",
+			}, nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/v1beta/models/test:generateContent?output=url", nil)
+
+	if err := app.convertInlineDataBase64ToUrlInResponse(root, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := extractInlineDataField(t, extractCandidateParts(t, mustMarshalJSONForTest(t, root))[0], "data")
+	want := "https://img.example.com/images/2026/03/31/a.png"
+	if got != want {
+		t.Fatalf("result data=%q want %q", got, want)
+	}
+}
+
+func TestConvertInlineDataBase64ToUrlInResponse_LegacyResultStillWrapsProxy(t *testing.T) {
+	root := map[string]interface{}{
+		"candidates": []interface{}{
+			map[string]interface{}{
+				"content": map[string]interface{}{
+					"parts": []interface{}{
+						map[string]interface{}{
+							"inlineData": map[string]interface{}{
+								"mimeType": "image/png",
+								"data":     base64.StdEncoding.EncodeToString([]byte("hello")),
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	app := &App{
+		Config: Config{
+			ImageHostMode:           "legacy",
+			PublicBaseURL:           "https://proxy.example.com",
+			ProxyStandardOutputURLs: true,
+		},
+		legacyUploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			return uploadResult{
+				URL:      "https://legacy.example/a.png",
+				Provider: "legacy",
+			}, nil
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/v1beta/models/test:generateContent?output=url", nil)
+
+	if err := app.convertInlineDataBase64ToUrlInResponse(root, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got := extractInlineDataField(t, extractCandidateParts(t, mustMarshalJSONForTest(t, root))[0], "data")
+	want := "https://proxy.example.com/proxy/image?url=" + url.QueryEscape("https://legacy.example/a.png")
+	if got != want {
+		t.Fatalf("result data=%q want %q", got, want)
+	}
+}
+
+func mustMarshalJSONForTest(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	out, err := marshalJSON(v)
+	if err != nil {
+		t.Fatalf("marshalJSON failed: %v", err)
+	}
+	return out
+}
+
 func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 	t.lastURL = req.URL.String()
