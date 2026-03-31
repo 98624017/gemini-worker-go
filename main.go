@@ -89,6 +89,13 @@ type Config struct {
 	SlowLogThreshold         time.Duration
 	ProxyStandardOutputURLs  bool
 	ProxySpecialUpstreamURLs bool
+	ImageHostMode            string
+	R2Endpoint               string
+	R2Bucket                 string
+	R2AccessKeyID            string
+	R2SecretAccessKey        string
+	R2PublicBaseURL          string
+	R2ObjectPrefix           string
 
 	// Admin UI (optional; disabled by default)
 	AdminPassword string
@@ -240,7 +247,48 @@ func applyTLSOptionsToTransport(t *http.Transport, tlsHandshakeTimeout time.Dura
 }
 
 func loadConfig() Config {
-	return loadConfigWithEnv(os.Getenv, detectContainerMemoryLimitBytes())
+	cfg, err := loadConfigWithEnvValidated(os.Getenv, detectContainerMemoryLimitBytes())
+	if err != nil {
+		log.Fatalf("load config: %v", err)
+	}
+	return cfg
+}
+
+func loadConfigWithEnvValidated(getenv func(string) string, containerLimitBytes int64) (Config, error) {
+	cfg := loadConfigWithEnv(getenv, containerLimitBytes)
+	if err := validateConfig(cfg); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
+func validateConfig(cfg Config) error {
+	mode := strings.ToLower(strings.TrimSpace(cfg.ImageHostMode))
+	switch mode {
+	case "", "legacy":
+		return nil
+	case "r2", "r2_then_legacy":
+	default:
+		return fmt.Errorf("IMAGE_HOST_MODE must be one of legacy, r2, r2_then_legacy")
+	}
+
+	// r2 与 r2_then_legacy 模式要求提供完整 R2 基础配置。
+	if strings.TrimSpace(cfg.R2Endpoint) == "" {
+		return errors.New("R2_ENDPOINT is required when IMAGE_HOST_MODE is r2 or r2_then_legacy")
+	}
+	if strings.TrimSpace(cfg.R2Bucket) == "" {
+		return errors.New("R2_BUCKET is required when IMAGE_HOST_MODE is r2 or r2_then_legacy")
+	}
+	if strings.TrimSpace(cfg.R2AccessKeyID) == "" {
+		return errors.New("R2_ACCESS_KEY_ID is required when IMAGE_HOST_MODE is r2 or r2_then_legacy")
+	}
+	if strings.TrimSpace(cfg.R2SecretAccessKey) == "" {
+		return errors.New("R2_SECRET_ACCESS_KEY is required when IMAGE_HOST_MODE is r2 or r2_then_legacy")
+	}
+	if strings.TrimSpace(cfg.R2PublicBaseURL) == "" {
+		return errors.New("R2_PUBLIC_BASE_URL is required when IMAGE_HOST_MODE is r2 or r2_then_legacy")
+	}
+	return nil
 }
 
 func loadConfigWithEnv(getenv func(string) string, containerLimitBytes int64) Config {
@@ -252,6 +300,21 @@ func loadConfigWithEnv(getenv func(string) string, containerLimitBytes int64) Co
 		UpstreamAPIKey:  getenv("UPSTREAM_API_KEY"),
 		PublicBaseURL:   getenv("PUBLIC_BASE_URL"),
 		Port:            getenv("PORT"),
+		ImageHostMode:   strings.ToLower(strings.TrimSpace(getenv("IMAGE_HOST_MODE"))),
+		R2Endpoint:      strings.TrimSpace(getenv("R2_ENDPOINT")),
+		R2Bucket:        strings.TrimSpace(getenv("R2_BUCKET")),
+		R2AccessKeyID:   strings.TrimSpace(getenv("R2_ACCESS_KEY_ID")),
+		R2SecretAccessKey: strings.TrimSpace(
+			getenv("R2_SECRET_ACCESS_KEY"),
+		),
+		R2PublicBaseURL: strings.TrimSpace(getenv("R2_PUBLIC_BASE_URL")),
+		R2ObjectPrefix:  strings.Trim(strings.TrimSpace(getenv("R2_OBJECT_PREFIX")), "/"),
+	}
+	if cfg.ImageHostMode == "" {
+		cfg.ImageHostMode = "legacy"
+	}
+	if cfg.R2ObjectPrefix == "" {
+		cfg.R2ObjectPrefix = "images"
 	}
 	if cfg.UpstreamBaseURL == "" {
 		cfg.UpstreamBaseURL = DefaultUpstreamBaseURL

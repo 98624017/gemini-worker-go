@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,42 @@ type recordingTransport struct {
 	statusCode  int
 	contentType string
 	body        []byte
+}
+
+func TestLoadConfigWithEnv_DefaultImageHostModeIsLegacy(t *testing.T) {
+	getenv := func(key string) string { return "" }
+	cfg, err := loadConfigWithEnvValidated(getenv, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ImageHostMode != "legacy" {
+		t.Fatalf("ImageHostMode=%q want legacy", cfg.ImageHostMode)
+	}
+}
+
+func TestLoadConfigWithEnv_R2ModeRequiresConfig(t *testing.T) {
+	env := map[string]string{
+		"IMAGE_HOST_MODE": "r2",
+	}
+	getenv := func(key string) string { return env[key] }
+	_, err := loadConfigWithEnvValidated(getenv, 0)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "R2_ENDPOINT") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfigWithEnv_RejectsInvalidImageHostMode(t *testing.T) {
+	env := map[string]string{
+		"IMAGE_HOST_MODE": "bad-mode",
+	}
+	getenv := func(key string) string { return env[key] }
+	_, err := loadConfigWithEnvValidated(getenv, 0)
+	if err == nil {
+		t.Fatal("expected error")
+	}
 }
 
 func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
