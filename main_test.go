@@ -63,6 +63,47 @@ func TestLoadConfigWithEnv_RejectsInvalidImageHostMode(t *testing.T) {
 	}
 }
 
+func TestUploadImageBytesToURL_LegacyModeUsesLegacyUploader(t *testing.T) {
+	app := &App{
+		Config: Config{ImageHostMode: "legacy"},
+		legacyUploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			return uploadResult{URL: "https://legacy.example/a.png", Provider: "legacy"}, nil
+		},
+		r2UploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			t.Fatal("r2 uploader should not be called")
+			return uploadResult{}, nil
+		},
+	}
+
+	got, err := app.uploadImageBytesToURL([]byte("img"), "image/png")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Provider != "legacy" {
+		t.Fatalf("Provider=%q want legacy", got.Provider)
+	}
+}
+
+func TestUploadImageBytesToURL_R2ThenLegacyFallsBack(t *testing.T) {
+	app := &App{
+		Config: Config{ImageHostMode: "r2_then_legacy"},
+		r2UploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			return uploadResult{}, errors.New("r2 down")
+		},
+		legacyUploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			return uploadResult{URL: "https://legacy.example/a.png", Provider: "legacy"}, nil
+		},
+	}
+
+	got, err := app.uploadImageBytesToURL([]byte("img"), "image/png")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Provider != "legacy" {
+		t.Fatalf("Provider=%q want legacy", got.Provider)
+	}
+}
+
 func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 	t.lastURL = req.URL.String()

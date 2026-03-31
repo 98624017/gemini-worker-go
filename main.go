@@ -144,6 +144,13 @@ type App struct {
 	MemoryController               *memoryReliefController
 	AdminLogs                      *adminLogBuffer
 	AdminStats                     *adminStats
+	legacyUploadFunc               func(data []byte, mimeType string) (uploadResult, error)
+	r2UploadFunc                   func(data []byte, mimeType string) (uploadResult, error)
+}
+
+type uploadResult struct {
+	URL      string
+	Provider string
 }
 
 func newBaseTransport() *http.Transport {
@@ -1893,6 +1900,46 @@ func (app *App) prewarmProxyImage(proxyURL string) {
 		log.Printf("[Prewarm Failed] read body: %v", err)
 		return
 	}
+}
+
+func (app *App) uploadImageBytesToURL(data []byte, mimeType string) (uploadResult, error) {
+	mode := strings.TrimSpace(app.Config.ImageHostMode)
+	if mode == "" {
+		mode = "legacy"
+	}
+	switch mode {
+	case "legacy":
+		return app.callLegacyUploader(data, mimeType)
+	case "r2":
+		return app.callR2Uploader(data, mimeType)
+	case "r2_then_legacy":
+		res, err := app.callR2Uploader(data, mimeType)
+		if err == nil {
+			return res, nil
+		}
+		log.Printf("[Image Upload Fallback] mode=%s provider=r2 err=%v", mode, err)
+		return app.callLegacyUploader(data, mimeType)
+	default:
+		return uploadResult{}, fmt.Errorf("unsupported IMAGE_HOST_MODE %q", mode)
+	}
+}
+
+func (app *App) callLegacyUploader(data []byte, mimeType string) (uploadResult, error) {
+	if app.legacyUploadFunc != nil {
+		return app.legacyUploadFunc(data, mimeType)
+	}
+	urlStr, err := app.uploadImageBytesToUrl(data, mimeType)
+	if err != nil {
+		return uploadResult{}, err
+	}
+	return uploadResult{URL: urlStr, Provider: "legacy"}, nil
+}
+
+func (app *App) callR2Uploader(data []byte, mimeType string) (uploadResult, error) {
+	if app.r2UploadFunc != nil {
+		return app.r2UploadFunc(data, mimeType)
+	}
+	return uploadResult{}, errors.New("r2 uploader is not configured")
 }
 
 func (app *App) uploadImageBytesToUrl(data []byte, mimeType string) (string, error) {
