@@ -65,6 +65,44 @@ func TestLoadConfigWithEnv_RejectsInvalidImageHostMode(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWithEnv_R2ModeRejectsInvalidEndpoint(t *testing.T) {
+	env := map[string]string{
+		"IMAGE_HOST_MODE":      "r2",
+		"R2_ENDPOINT":          "ftp://invalid-endpoint",
+		"R2_BUCKET":            "images",
+		"R2_ACCESS_KEY_ID":     "key",
+		"R2_SECRET_ACCESS_KEY": "secret",
+		"R2_PUBLIC_BASE_URL":   "https://img.example.com",
+	}
+	getenv := func(key string) string { return env[key] }
+	_, err := loadConfigWithEnvValidated(getenv, 0)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "R2_ENDPOINT") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadConfigWithEnv_R2ModeRejectsInvalidPublicBaseURL(t *testing.T) {
+	env := map[string]string{
+		"IMAGE_HOST_MODE":      "r2",
+		"R2_ENDPOINT":          "https://example.r2.cloudflarestorage.com",
+		"R2_BUCKET":            "images",
+		"R2_ACCESS_KEY_ID":     "key",
+		"R2_SECRET_ACCESS_KEY": "secret",
+		"R2_PUBLIC_BASE_URL":   "not-a-url",
+	}
+	getenv := func(key string) string { return env[key] }
+	_, err := loadConfigWithEnvValidated(getenv, 0)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "R2_PUBLIC_BASE_URL") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestUploadImageBytesToURL_LegacyModeUsesLegacyUploader(t *testing.T) {
 	app := &App{
 		Config: Config{ImageHostMode: "legacy"},

@@ -302,6 +302,12 @@ func validateConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.R2PublicBaseURL) == "" {
 		return errors.New("R2_PUBLIC_BASE_URL is required when IMAGE_HOST_MODE is r2 or r2_then_legacy")
 	}
+	if _, err := parseR2Endpoint(cfg.R2Endpoint); err != nil {
+		return fmt.Errorf("R2_ENDPOINT is invalid: %w", err)
+	}
+	if _, err := parseHTTPBaseURL(cfg.R2PublicBaseURL, "R2_PUBLIC_BASE_URL"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -2047,6 +2053,26 @@ func parseR2Endpoint(raw string) (*url.URL, error) {
 	}
 	if strings.TrimSpace(parsed.Host) == "" {
 		return nil, errors.New("R2_ENDPOINT host is empty")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
+	return parsed, nil
+}
+
+func parseHTTPBaseURL(raw string, envName string) (*url.URL, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, fmt.Errorf("%s is empty", envName)
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", envName, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("%s must use http or https", envName)
+	}
+	if strings.TrimSpace(parsed.Host) == "" {
+		return nil, fmt.Errorf("%s host is empty", envName)
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	parsed.RawPath = strings.TrimRight(parsed.RawPath, "/")
