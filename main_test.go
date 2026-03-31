@@ -264,6 +264,95 @@ func mustMarshalJSONForTest(t *testing.T, v interface{}) []byte {
 	return out
 }
 
+func TestHandleNonStreamResponse_OutputURL_R2ThenLegacyFallbackUsesLegacyURLRules(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte("hello"))
+	upstreamBody := makeInlineDataResponseBody(
+		map[string]interface{}{
+			"inlineData": map[string]interface{}{
+				"mimeType": "image/png",
+				"data":     b64,
+			},
+		},
+	)
+
+	app := &App{
+		Config: Config{
+			ImageHostMode:           "r2_then_legacy",
+			PublicBaseURL:           "https://proxy.example.com",
+			ProxyStandardOutputURLs: true,
+		},
+		r2UploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			return uploadResult{}, errors.New("r2 down")
+		},
+		legacyUploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			return uploadResult{
+				URL:      "https://legacy.example/a.png",
+				Provider: "legacy",
+			}, nil
+		},
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(upstreamBody)),
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/v1beta/models/test:generateContent?output=url", nil)
+	rr := httptest.NewRecorder()
+
+	app.handleNonStreamResponse(rr, resp, "url", req, nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	parts := extractCandidateParts(t, rr.Body.Bytes())
+	got := extractInlineDataField(t, parts[0], "data")
+	want := "https://proxy.example.com/proxy/image?url=" + url.QueryEscape("https://legacy.example/a.png")
+	if got != want {
+		t.Fatalf("result data=%q want %q", got, want)
+	}
+}
+
+func TestHandleNonStreamResponse_OutputURL_R2FailureStillFailOpen(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte("hello"))
+	upstreamBody := makeInlineDataResponseBody(
+		map[string]interface{}{
+			"inlineData": map[string]interface{}{
+				"mimeType": "image/png",
+				"data":     b64,
+			},
+		},
+	)
+
+	app := &App{
+		Config: Config{
+			ImageHostMode:           "r2",
+			PublicBaseURL:           "https://proxy.example.com",
+			ProxyStandardOutputURLs: true,
+		},
+		r2UploadFunc: func(data []byte, mimeType string) (uploadResult, error) {
+			return uploadResult{}, errors.New("r2 down")
+		},
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader(upstreamBody)),
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/v1beta/models/test:generateContent?output=url", nil)
+	rr := httptest.NewRecorder()
+
+	app.handleNonStreamResponse(rr, resp, "url", req, nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rr.Code, rr.Body.String())
+	}
+	parts := extractCandidateParts(t, rr.Body.Bytes())
+	got := extractInlineDataField(t, parts[0], "data")
+	if got != b64 {
+		t.Fatalf("expected fail-open to preserve base64, got=%q want=%q", got, b64)
+	}
+}
+
 func (t *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 	t.lastURL = req.URL.String()

@@ -140,6 +140,47 @@ ALLOWED_PROXY_DOMAINS="ai.kefan.cn,uguu.se,.uguu.se,.aitohumanize.com,.xuancat.c
 - 默认 base64 返回
 - `output=url`（会在上传图床前先丢掉较小图片，避免返回两个 URL）
 
+#### `IMAGE_HOST_MODE`（默认 `legacy`）
+
+控制标准 `inlineData.data=base64` 图片在 `output=url` 时上传到哪里。
+
+- `legacy`：继续使用现有图床上传链路（`uguu -> kefan`）
+- `r2`：仅上传到 R2
+- `r2_then_legacy`：优先上传到 R2，失败后回退现有图床链路
+
+返回规则：
+
+- 最终来自 **legacy** 的 URL：继续受 `PROXY_STANDARD_OUTPUT_URLS` 控制
+- 最终来自 **R2** 的 URL：始终直出 `R2_PUBLIC_BASE_URL/<objectKey>`，**不会**再套 `/proxy/image`
+
+失败策略：
+
+- `r2`：R2 上传失败后，保持当前 fail-open 行为，响应保留原始 base64
+- `r2_then_legacy`：R2 上传失败后自动回退 legacy 图床；若 legacy 也失败，仍保持 fail-open
+
+#### R2 相关环境变量
+
+当 `IMAGE_HOST_MODE=r2|r2_then_legacy` 时，以下变量必填：
+
+- `R2_ENDPOINT`
+  - 例如：`https://<accountid>.r2.cloudflarestorage.com`
+- `R2_BUCKET`
+- `R2_ACCESS_KEY_ID`
+- `R2_SECRET_ACCESS_KEY`
+- `R2_PUBLIC_BASE_URL`
+  - 对外返回的自定义公网域名前缀，例如：`https://img.example.com`
+
+可选变量：
+
+- `R2_OBJECT_PREFIX`
+  - 默认 `images`
+  - 对象 key 形如：`images/YYYY/MM/DD/<timestamp>-<rand>.<ext>`
+
+启动校验：
+
+- `legacy` 模式下忽略 R2 配置
+- `r2` / `r2_then_legacy` 模式下，如果缺少任一必填项，服务会在启动时直接失败
+
 #### `PROXY_STANDARD_OUTPUT_URLS`（默认开启）
 
 控制“标准 Gemini 返回体（inlineData.data=Base64）→ 上传图床得到 URL”之后，是否进一步把图床 URL 包装为 `${PUBLIC_BASE_URL}/proxy/image?...`：
