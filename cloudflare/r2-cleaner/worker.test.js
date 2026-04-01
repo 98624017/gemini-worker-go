@@ -35,6 +35,14 @@ test("parsePositiveInt rejects invalid numbers", () => {
     () => parsePositiveInt("abc", "R2_CLEANUP_MAX_AGE_SECONDS", "10800"),
     /positive integer/,
   );
+  assert.throws(
+    () => parsePositiveInt("1.5", "R2_CLEANUP_MAX_AGE_SECONDS", "10800"),
+    /positive integer/,
+  );
+  assert.throws(
+    () => parsePositiveInt("10800abc", "R2_CLEANUP_MAX_AGE_SECONDS", "10800"),
+    /positive integer/,
+  );
 });
 
 test("collectExpiredKeys returns objects older than cutoff", () => {

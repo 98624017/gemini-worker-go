@@ -8,8 +8,11 @@ export function normalizePrefix(value) {
 
 export function parsePositiveInt(value, fieldName, defaultValue) {
   const raw = String(value ?? defaultValue).trim();
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${fieldName} must be a positive integer`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`${fieldName} must be a positive integer`);
   }
   return parsed;
