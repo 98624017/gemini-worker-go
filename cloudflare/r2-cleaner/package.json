@@ -1,0 +1,9 @@
+{
+  "name": "banana-r2-cleaner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test worker.test.js",
+    "dev": "wrangler dev --config wrangler.jsonc --test-scheduled"
+  }
+}
