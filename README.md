@@ -181,6 +181,53 @@ ALLOWED_PROXY_DOMAINS="ai.kefan.cn,uguu.se,.uguu.se,.aitohumanize.com,.xuancat.c
 - `legacy` 模式下忽略 R2 配置
 - `r2` / `r2_then_legacy` 模式下，如果缺少任一必填项，服务会在启动时直接失败
 
+#### R2 定时清理 Worker
+
+仓库内提供了独立的 Cloudflare Worker 定时清理器，目录：
+
+- `cloudflare/r2-cleaner/`
+
+用途：
+
+- 定时遍历 R2 bucket 中指定前缀的对象
+- 删除 `uploaded` 时间早于阈值的对象
+- 与 Go 服务实例数无关，适合多实例部署场景
+
+默认配置：
+
+- Cron：`*/30 * * * *`
+- `R2_CLEANUP_PREFIX=images`
+- `R2_CLEANUP_MAX_AGE_SECONDS=10800`
+
+建议：
+
+- 生产环境让 `R2_CLEANUP_PREFIX` 与 Go 服务的 `R2_OBJECT_PREFIX` 保持一致
+- 默认只清理指定前缀；若把前缀留空，则会扫描整个 bucket
+
+部署前需要先修改：
+
+- `cloudflare/r2-cleaner/wrangler.jsonc` 中的 `bucket_name`
+
+本地调试：
+
+```bash
+npx wrangler dev --config cloudflare/r2-cleaner/wrangler.jsonc --test-scheduled
+```
+
+启动后可访问：
+
+```text
+http://127.0.0.1:8787/__scheduled
+```
+
+来手动触发一次定时任务。
+
+部署：
+
+```bash
+npx wrangler deploy --config cloudflare/r2-cleaner/wrangler.jsonc
+```
+
 #### `PROXY_STANDARD_OUTPUT_URLS`（默认开启）
 
 控制“标准 Gemini 返回体（inlineData.data=Base64）→ 上传图床得到 URL”之后，是否进一步把图床 URL 包装为 `${PUBLIC_BASE_URL}/proxy/image?...`：
