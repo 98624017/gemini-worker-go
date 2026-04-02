@@ -1,14 +1,16 @@
 {
   "name": "banana-r2-cleaner",
   "main": "worker.js",
+  "account_id": "b90e43483db7d824b74157de8bf5c718",
   "compatibility_date": "2026-04-01",
   "triggers": {
     "crons": ["*/30 * * * *"]
   },
+  // 不在仓库默认配置中把 preview/local dev 指向生产桶，避免本地联调误删线上对象。
   "r2_buckets": [
     {
       "binding": "R2_BUCKET",
-      "bucket_name": "TODO_REPLACE_BUCKET_NAME"
+      "bucket_name": "xinbaoimage"
     }
   ],
   "vars": {

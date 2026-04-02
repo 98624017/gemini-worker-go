@@ -47,7 +47,7 @@ func TestValidateGenerateContentRequestRejectsOutputNotURL(t *testing.T) {
 	assertRequestError(t, err, http.StatusBadRequest)
 }
 
-func TestValidateGenerateContentRequestRejectsPromptOverLimit(t *testing.T) {
+func TestValidateGenerateContentRequestAllowsLongPrompt(t *testing.T) {
 	t.Parallel()
 
 	req := newGeminiRequest(
@@ -58,8 +58,13 @@ func TestValidateGenerateContentRequestRejectsPromptOverLimit(t *testing.T) {
 		"identity",
 	)
 
-	_, err := ValidateGenerateContentRequest(req, "gemini-3-pro-image-preview")
-	assertRequestError(t, err, http.StatusBadRequest)
+	validated, err := ValidateGenerateContentRequest(req, "gemini-3-pro-image-preview")
+	if err != nil {
+		t.Fatalf("ValidateGenerateContentRequest() error = %v", err)
+	}
+	if validated.PromptLength != 4001 {
+		t.Fatalf("PromptLength = %d, want %d", validated.PromptLength, 4001)
+	}
 }
 
 func TestValidateGenerateContentRequestRejectsTooManyReferenceImages(t *testing.T) {

@@ -16,7 +16,6 @@ import (
 )
 
 const (
-	maxPromptChars           = 4000
 	maxReferenceImages       = 8
 	maxReferenceURLLength    = 4096
 	maxDecompressedBodyBytes = 2 * 1024 * 1024
@@ -95,13 +94,6 @@ func ValidateGenerateContentRequest(r *http.Request, model string) (ValidatedGem
 	}
 
 	promptLength := countPromptText(body)
-	if promptLength > maxPromptChars {
-		return ValidatedGeminiRequest{}, &RequestError{
-			StatusCode: http.StatusBadRequest,
-			Code:       "prompt_too_long",
-			Message:    fmt.Sprintf("prompt text exceeds %d characters", maxPromptChars),
-		}
-	}
 
 	referenceImageCount, err := validateReferenceImageURLs(body)
 	if err != nil {
