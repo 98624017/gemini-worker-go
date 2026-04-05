@@ -19,8 +19,8 @@ use url::{Url, form_urlencoded};
 use crate::config::Config;
 use crate::proxy_image::{hostname_matches_domain_patterns, is_forbidden_fetch_target};
 use crate::request_rewrite::{RewriteServices, rewrite_request_inline_data};
-use crate::response_rewrite::normalize_gemini_response;
-use crate::stream_rewrite::rewrite_sse_text_with;
+use crate::response_rewrite::{normalize_gemini_response, rewrite_inline_data_base64_to_urls};
+use crate::upload::Uploader;
 use crate::upstream::{ResolvedUpstream, resolve_upstream_from_header_map};
 
 const MAX_REQUEST_BODY_BYTES: usize = 20 * 1024 * 1024;
@@ -30,6 +30,7 @@ struct AppState {
     config: Arc<Config>,
     upstream_client: reqwest::Client,
     image_client: reqwest::Client,
+    uploader: Arc<Uploader>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,7 +46,12 @@ enum OutputMode {
 }
 
 pub fn build_router(config: Config) -> Router {
+    let upload_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(config.upload_timeout_ms))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let state = AppState {
+        uploader: Arc::new(Uploader::new(upload_client, config.clone())),
         config: Arc::new(config),
         upstream_client: reqwest::Client::new(),
         image_client: reqwest::Client::new(),
@@ -151,15 +157,23 @@ async fn forward_gemini_request(
     let upstream_response = upstream_request.send().await?;
 
     if is_stream {
-        handle_stream_response(upstream_response).await
+        handle_stream_response(
+            upstream_response,
+            output_mode,
+            state.uploader.as_ref(),
+            state.config.as_ref(),
+        )
+        .await
     } else {
-        handle_non_stream_response(upstream_response, output_mode).await
+        handle_non_stream_response(upstream_response, output_mode, state.uploader.as_ref(), state.config.as_ref()).await
     }
 }
 
 async fn handle_non_stream_response(
     upstream_response: reqwest::Response,
-    _output_mode: OutputMode,
+    output_mode: OutputMode,
+    uploader: &Uploader,
+    config: &Config,
 ) -> Result<Response> {
     let status = upstream_response.status();
     let content_type = upstream_response
@@ -186,23 +200,37 @@ async fn handle_non_stream_response(
         }
     };
 
-    let final_body = serde_json::to_vec(&normalize_gemini_response(json_body))?;
+    let mut final_json = normalize_gemini_response(json_body);
+    if output_mode == OutputMode::Url {
+        final_json = rewrite_inline_data_base64_to_urls(
+            final_json,
+            uploader,
+            &config.public_base_url,
+            config.proxy_standard_output_urls,
+        )
+        .await;
+    }
+    let final_body = serde_json::to_vec(&final_json)?;
     let mut response = Response::new(Body::from(final_body));
     *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
     Ok(response)
 }
 
-async fn handle_stream_response(upstream_response: reqwest::Response) -> Result<Response> {
+async fn handle_stream_response(
+    upstream_response: reqwest::Response,
+    output_mode: OutputMode,
+    uploader: &Uploader,
+    config: &Config,
+) -> Result<Response> {
     let status = upstream_response.status();
     let body_text = upstream_response.text().await?;
 
     let mut response = if !status.is_success() {
         Response::new(Body::from(body_text))
     } else {
-        let rewritten = rewrite_sse_text_with(&body_text, |value| {
-            Ok(normalize_gemini_response(value))
-        })?;
+        let rewritten =
+            rewrite_stream_text(&body_text, output_mode, uploader, config).await?;
         let mut response = Response::new(Body::from(rewritten));
         response.headers_mut().insert(
             CONTENT_TYPE,
@@ -219,6 +247,57 @@ async fn handle_stream_response(upstream_response: reqwest::Response) -> Result<
         );
     }
     Ok(response)
+}
+
+async fn rewrite_stream_text(
+    input: &str,
+    output_mode: OutputMode,
+    uploader: &Uploader,
+    config: &Config,
+) -> Result<String> {
+    let mut output = String::with_capacity(input.len());
+
+    for line in input.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        let line_ending = &line[trimmed.len()..];
+
+        if !trimmed.starts_with("data:") {
+            output.push_str(trimmed);
+            output.push_str(line_ending);
+            continue;
+        }
+
+        let raw = trimmed.trim_start_matches("data:").trim();
+        if raw.is_empty() || raw == "[DONE]" {
+            output.push_str(trimmed);
+            output.push_str(line_ending);
+            continue;
+        }
+
+        match serde_json::from_str::<Value>(raw) {
+            Ok(value) => {
+                let mut rewritten = normalize_gemini_response(value);
+                if output_mode == OutputMode::Url {
+                    rewritten = rewrite_inline_data_base64_to_urls(
+                        rewritten,
+                        uploader,
+                        &config.public_base_url,
+                        config.proxy_standard_output_urls,
+                    )
+                    .await;
+                }
+                output.push_str("data: ");
+                output.push_str(&serde_json::to_string(&rewritten)?);
+                output.push_str(line_ending);
+            }
+            Err(_) => {
+                output.push_str(trimmed);
+                output.push_str(line_ending);
+            }
+        }
+    }
+
+    Ok(output)
 }
 
 async fn proxy_image(

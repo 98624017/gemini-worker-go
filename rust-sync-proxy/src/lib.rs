@@ -26,5 +26,16 @@ pub fn test_config() -> Config {
             ".uguu.se".to_string(),
             ".aitohumanize.com".to_string(),
         ],
+        public_base_url: String::new(),
+        proxy_standard_output_urls: true,
+        upload_timeout_ms: 10_000,
+        legacy_uguu_upload_url: "https://uguu.se/upload".to_string(),
+        legacy_kefan_upload_url: "https://ai.kefan.cn/api/upload/local".to_string(),
+        r2_endpoint: String::new(),
+        r2_bucket: String::new(),
+        r2_access_key_id: String::new(),
+        r2_secret_access_key: String::new(),
+        r2_public_base_url: String::new(),
+        r2_object_prefix: "images".to_string(),
     }
 }
