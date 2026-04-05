@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-RUST_DIR="$ROOT_DIR/rust-sync-proxy"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+GO_IMPL_ROOT="${GO_IMPL_ROOT:-}"
 TMP_DIR="$(mktemp -d)"
 MOCK_PORT="${MOCK_PORT:-19080}"
 GO_PORT="${GO_PORT:-18787}"
@@ -40,6 +40,17 @@ require_cmd curl
 require_cmd jq
 require_cmd python3
 require_cmd go
+
+if [[ -z "$GO_IMPL_ROOT" ]]; then
+  echo "GO_IMPL_ROOT is required, for example:" >&2
+  echo "  GO_IMPL_ROOT=/path/to/go-implementation bash ./scripts/compare_with_go.sh" >&2
+  exit 1
+fi
+
+if [[ ! -f "$GO_IMPL_ROOT/main.go" ]]; then
+  echo "GO_IMPL_ROOT does not look like the Go proxy root: $GO_IMPL_ROOT" >&2
+  exit 1
+fi
 
 python3 - "$MOCK_PORT" >"$TMP_DIR/mock.log" 2>&1 <<'PY' &
 import json
@@ -126,7 +137,7 @@ MOCK_PID=$!
 wait_http "http://127.0.0.1:${MOCK_PORT}/healthz"
 
 (
-  cd "$ROOT_DIR"
+  cd "$GO_IMPL_ROOT"
   PORT="$GO_PORT" \
   UPSTREAM_BASE_URL="http://127.0.0.1:${MOCK_PORT}" \
   UPSTREAM_API_KEY="env-key" \
@@ -142,7 +153,7 @@ wait_http "http://127.0.0.1:${MOCK_PORT}/healthz"
 GO_PID=$!
 
 (
-  cd "$ROOT_DIR"
+  cd "$REPO_ROOT"
   PORT="$RUST_PORT" \
   UPSTREAM_BASE_URL="http://127.0.0.1:${MOCK_PORT}" \
   UPSTREAM_API_KEY="env-key" \
@@ -153,7 +164,7 @@ GO_PID=$!
   R2_SECRET_ACCESS_KEY="test-secret" \
   R2_PUBLIC_BASE_URL="https://img.example.com" \
   R2_OBJECT_PREFIX="images" \
-  "$HOME/.cargo/bin/cargo" run --manifest-path "$RUST_DIR/Cargo.toml"
+  "$HOME/.cargo/bin/cargo" run --manifest-path "$REPO_ROOT/Cargo.toml"
 ) >"$TMP_DIR/rust.log" 2>&1 &
 RUST_PID=$!
 

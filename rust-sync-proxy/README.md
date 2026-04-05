@@ -1,12 +1,12 @@
 # rust-sync-proxy
 
-仓库内独立的新目录实现，只覆盖根目录同步 Gemini 兼容代理的核心链路。
+一个独立的 Rust 同步 Gemini 兼容代理实现。
 
 目标：
 
-- 不修改现有 Go 代码
-- 在 `rust-sync-proxy/` 下提供可单独构建、运行、测试的 Rust 版本
-- 优先对齐当前根目录同步代理的主链路行为
+- 可单独构建、运行、测试和容器化
+- 优先对齐既有 Go 同步代理的主链路行为
+- 方便直接拆分为单独公开仓库
 
 当前状态：
 
@@ -19,7 +19,8 @@
   - `r2`
   - `r2_then_legacy`
 - 已实现 `/proxy/image`
-- 已有 Go/Rust 对照脚本与 Rust 集成测试
+- 已有 Rust 集成测试
+- 已有可选的 Go/Rust 对照脚本
 
 当前明确未覆盖：
 
@@ -40,16 +41,13 @@
 
 如果 `cargo` 不在 PATH，可直接使用 `~/.cargo/bin/cargo`。
 
-也可以先复制一份环境变量模板：
+先复制一份环境变量模板：
 
 ```bash
-cd rust-sync-proxy
 cp .env.example .env
 ```
 
 ```bash
-cd rust-sync-proxy
-
 export PORT=8787
 export UPSTREAM_BASE_URL="https://magic666.top"
 export UPSTREAM_API_KEY="your-upstream-key"
@@ -60,8 +58,13 @@ export UPSTREAM_API_KEY="your-upstream-key"
 本地构建：
 
 ```bash
-cd rust-sync-proxy
 ~/.cargo/bin/cargo build
+```
+
+发布模式构建：
+
+```bash
+~/.cargo/bin/cargo build --release --locked
 ```
 
 ## 常用环境变量
@@ -176,14 +179,14 @@ curl -sS \
 跑 Rust 测试：
 
 ```bash
-cd rust-sync-proxy
 ~/.cargo/bin/cargo test --tests -- --nocapture
 ```
 
 跑 Go/Rust 对照：
 
 ```bash
-bash ./rust-sync-proxy/scripts/compare_with_go.sh
+GO_IMPL_ROOT=/path/to/go-implementation \
+  bash ./scripts/compare_with_go.sh
 ```
 
 当前对照脚本会验证：
@@ -193,9 +196,41 @@ bash ./rust-sync-proxy/scripts/compare_with_go.sh
 - 非流式 `output=url + r2`
 - 流式 `output=url + r2`
 
+## Docker
+
+构建镜像：
+
+```bash
+docker build -t rust-sync-proxy:local .
+```
+
+运行容器：
+
+```bash
+docker run --rm -p 8787:8787 \
+  -e UPSTREAM_BASE_URL="https://magic666.top" \
+  -e UPSTREAM_API_KEY="your-upstream-key" \
+  rust-sync-proxy:local
+```
+
+如果要跑 `output=url + r2`，继续补上：
+
+```bash
+docker run --rm -p 8787:8787 \
+  -e UPSTREAM_BASE_URL="https://magic666.top" \
+  -e UPSTREAM_API_KEY="your-upstream-key" \
+  -e IMAGE_HOST_MODE="r2" \
+  -e R2_ENDPOINT="https://<accountid>.r2.cloudflarestorage.com" \
+  -e R2_BUCKET="images" \
+  -e R2_ACCESS_KEY_ID="key" \
+  -e R2_SECRET_ACCESS_KEY="secret" \
+  -e R2_PUBLIC_BASE_URL="https://img.example.com" \
+  rust-sync-proxy:local
+```
+
 ## 当前实现边界
 
-这个目录现在更像“同步代理重构实验线”，不是 Go 版的完整替代品。
+这个项目现在更像“同步代理重构实验线”，不是 Go 版的完整替代品。
 
 如果你要继续推进到可切流状态，建议下一步按下面顺序补：
 
