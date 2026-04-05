@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod cache;
 pub mod config;
 pub mod http;
@@ -5,6 +6,7 @@ pub mod image_io;
 pub mod proxy_image;
 pub mod request_rewrite;
 pub mod response_rewrite;
+pub mod stream_rewrite;
 pub mod upload;
 pub mod upstream;
 
