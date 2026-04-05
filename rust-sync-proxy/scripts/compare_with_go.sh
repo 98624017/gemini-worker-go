@@ -1,6 +1,167 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "TODO: 启动 Go 同步代理与 Rust 同步代理"
-echo "TODO: 回放 tests/fixtures 下的请求与流式样例"
-echo "TODO: 对比状态码、JSON 结构、SSE data payload 与图片改写结果"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RUST_DIR="$ROOT_DIR/rust-sync-proxy"
+TMP_DIR="$(mktemp -d)"
+MOCK_PORT="${MOCK_PORT:-19080}"
+GO_PORT="${GO_PORT:-18787}"
+RUST_PORT="${RUST_PORT:-18788}"
+
+cleanup() {
+  set +e
+  [[ -n "${GO_PID:-}" ]] && kill "$GO_PID" >/dev/null 2>&1
+  [[ -n "${RUST_PID:-}" ]] && kill "$RUST_PID" >/dev/null 2>&1
+  [[ -n "${MOCK_PID:-}" ]] && kill "$MOCK_PID" >/dev/null 2>&1
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "missing required command: $1" >&2
+    exit 1
+  }
+}
+
+wait_http() {
+  local url="$1"
+  for _ in $(seq 1 80); do
+    if curl -sS -o /dev/null "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "timeout waiting for $url" >&2
+  return 1
+}
+
+require_cmd curl
+require_cmd jq
+require_cmd python3
+require_cmd go
+
+python3 - "$MOCK_PORT" >"$TMP_DIR/mock.log" 2>&1 <<'PY' &
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port = int(sys.argv[1])
+
+generate_payload = {
+    "thoughtSignature": "secret",
+    "candidates": [{
+        "finishReason": "STOP",
+        "content": {
+            "parts": [
+                {"inlineData": {"mimeType": "image/png", "data": "aaaa"}},
+                {"text": "kept"},
+                {"inlineData": {"mimeType": "image/png", "data": "aaaaaaaa"}}
+            ]
+        }
+    }]
+}
+
+stream_payload = (
+    "event: message\n"
+    "data: {\"thoughtSignature\":\"secret\",\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"aaaa\"}},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"bbbbbbbb\"}}]}}]}\n"
+    "\n"
+    "data: [DONE]\n"
+)
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/healthz":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        _ = self.rfile.read(length)
+
+        if self.path.startswith("/v1beta/models/demo:generateContent"):
+            payload = json.dumps(generate_payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if self.path.startswith("/v1beta/models/demo:streamGenerateContent"):
+            payload = stream_payload.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, fmt, *args):
+        return
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+PY
+MOCK_PID=$!
+
+wait_http "http://127.0.0.1:${MOCK_PORT}/healthz"
+
+(
+  cd "$ROOT_DIR"
+  PORT="$GO_PORT" \
+  UPSTREAM_BASE_URL="http://127.0.0.1:${MOCK_PORT}" \
+  UPSTREAM_API_KEY="env-key" \
+  go run .
+) >"$TMP_DIR/go.log" 2>&1 &
+GO_PID=$!
+
+(
+  cd "$ROOT_DIR"
+  PORT="$RUST_PORT" \
+  UPSTREAM_BASE_URL="http://127.0.0.1:${MOCK_PORT}" \
+  UPSTREAM_API_KEY="env-key" \
+  "$HOME/.cargo/bin/cargo" run --manifest-path "$RUST_DIR/Cargo.toml"
+) >"$TMP_DIR/rust.log" 2>&1 &
+RUST_PID=$!
+
+wait_http "http://127.0.0.1:${GO_PORT}/does-not-exist"
+wait_http "http://127.0.0.1:${RUST_PORT}/does-not-exist"
+
+NON_STREAM_REQ='{"contents":[{"parts":[{"text":"hello"}]}]}'
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$NON_STREAM_REQ" \
+  "http://127.0.0.1:${GO_PORT}/v1beta/models/demo:generateContent" \
+  | jq -S . >"$TMP_DIR/go-generate.json"
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$NON_STREAM_REQ" \
+  "http://127.0.0.1:${RUST_PORT}/v1beta/models/demo:generateContent" \
+  | jq -S . >"$TMP_DIR/rust-generate.json"
+
+diff -u "$TMP_DIR/go-generate.json" "$TMP_DIR/rust-generate.json"
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$NON_STREAM_REQ" \
+  "http://127.0.0.1:${GO_PORT}/v1beta/models/demo:streamGenerateContent" \
+  >"$TMP_DIR/go-stream.txt"
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$NON_STREAM_REQ" \
+  "http://127.0.0.1:${RUST_PORT}/v1beta/models/demo:streamGenerateContent" \
+  >"$TMP_DIR/rust-stream.txt"
+
+diff -u "$TMP_DIR/go-stream.txt" "$TMP_DIR/rust-stream.txt"
+
+echo "Go/Rust compatibility check passed."

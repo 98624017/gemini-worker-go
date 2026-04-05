@@ -1,5 +1,27 @@
 use serde_json::Value;
 
+pub fn normalize_gemini_response(mut body: Value) -> Value {
+    remove_thought_signatures(&mut body);
+    keep_largest_inline_image(body)
+}
+
+pub fn remove_thought_signatures(node: &mut Value) {
+    match node {
+        Value::Object(map) => {
+            map.remove("thoughtSignature");
+            for child in map.values_mut() {
+                remove_thought_signatures(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                remove_thought_signatures(child);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn keep_largest_inline_image(mut body: Value) -> Value {
     let Some(candidates) = body.get_mut("candidates").and_then(Value::as_array_mut) else {
         return body;
