@@ -104,6 +104,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def do_PUT(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        _ = self.rfile.read(length)
+
+        if self.path.startswith("/bucket/images/"):
+            self.send_response(200)
+            self.end_headers()
+            return
+
+        self.send_response(404)
+        self.end_headers()
+
     def log_message(self, fmt, *args):
         return
 
@@ -118,6 +130,13 @@ wait_http "http://127.0.0.1:${MOCK_PORT}/healthz"
   PORT="$GO_PORT" \
   UPSTREAM_BASE_URL="http://127.0.0.1:${MOCK_PORT}" \
   UPSTREAM_API_KEY="env-key" \
+  IMAGE_HOST_MODE="r2" \
+  R2_ENDPOINT="http://127.0.0.1:${MOCK_PORT}" \
+  R2_BUCKET="bucket" \
+  R2_ACCESS_KEY_ID="test-key" \
+  R2_SECRET_ACCESS_KEY="test-secret" \
+  R2_PUBLIC_BASE_URL="https://img.example.com" \
+  R2_OBJECT_PREFIX="images" \
   go run .
 ) >"$TMP_DIR/go.log" 2>&1 &
 GO_PID=$!
@@ -127,6 +146,13 @@ GO_PID=$!
   PORT="$RUST_PORT" \
   UPSTREAM_BASE_URL="http://127.0.0.1:${MOCK_PORT}" \
   UPSTREAM_API_KEY="env-key" \
+  IMAGE_HOST_MODE="r2" \
+  R2_ENDPOINT="http://127.0.0.1:${MOCK_PORT}" \
+  R2_BUCKET="bucket" \
+  R2_ACCESS_KEY_ID="test-key" \
+  R2_SECRET_ACCESS_KEY="test-secret" \
+  R2_PUBLIC_BASE_URL="https://img.example.com" \
+  R2_OBJECT_PREFIX="images" \
   "$HOME/.cargo/bin/cargo" run --manifest-path "$RUST_DIR/Cargo.toml"
 ) >"$TMP_DIR/rust.log" 2>&1 &
 RUST_PID=$!
@@ -150,6 +176,41 @@ curl -fsS \
 
 diff -u "$TMP_DIR/go-generate.json" "$TMP_DIR/rust-generate.json"
 
+URL_REQ='{"output":"url","contents":[{"parts":[{"text":"hello"}]}]}'
+
+normalize_output_url_json() {
+  jq -S '
+    walk(
+      if type == "object"
+         and has("inlineData")
+         and (.inlineData | type == "object")
+         and (.inlineData.data | type == "string")
+         and (.inlineData.data | startswith("https://img.example.com/images/"))
+      then .inlineData.data = "https://img.example.com/__R2_OBJECT__"
+      else .
+      end
+    )
+  '
+}
+
+normalize_output_url_stream() {
+  sed -E 's#https://img\.example\.com/images/[^"[:space:]]+#https://img.example.com/__R2_OBJECT__#g'
+}
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$URL_REQ" \
+  "http://127.0.0.1:${GO_PORT}/v1beta/models/demo:generateContent" \
+  | normalize_output_url_json >"$TMP_DIR/go-generate-url.json"
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$URL_REQ" \
+  "http://127.0.0.1:${RUST_PORT}/v1beta/models/demo:generateContent" \
+  | normalize_output_url_json >"$TMP_DIR/rust-generate-url.json"
+
+diff -u "$TMP_DIR/go-generate-url.json" "$TMP_DIR/rust-generate-url.json"
+
 curl -fsS \
   -H 'Content-Type: application/json' \
   -d "$NON_STREAM_REQ" \
@@ -163,5 +224,19 @@ curl -fsS \
   >"$TMP_DIR/rust-stream.txt"
 
 diff -u "$TMP_DIR/go-stream.txt" "$TMP_DIR/rust-stream.txt"
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$URL_REQ" \
+  "http://127.0.0.1:${GO_PORT}/v1beta/models/demo:streamGenerateContent" \
+  | normalize_output_url_stream >"$TMP_DIR/go-stream-url.txt"
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$URL_REQ" \
+  "http://127.0.0.1:${RUST_PORT}/v1beta/models/demo:streamGenerateContent" \
+  | normalize_output_url_stream >"$TMP_DIR/rust-stream-url.txt"
+
+diff -u "$TMP_DIR/go-stream-url.txt" "$TMP_DIR/rust-stream-url.txt"
 
 echo "Go/Rust compatibility check passed."
