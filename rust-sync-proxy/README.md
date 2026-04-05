@@ -40,6 +40,13 @@
 
 如果 `cargo` 不在 PATH，可直接使用 `~/.cargo/bin/cargo`。
 
+也可以先复制一份环境变量模板：
+
+```bash
+cd rust-sync-proxy
+cp .env.example .env
+```
+
 ```bash
 cd rust-sync-proxy
 
