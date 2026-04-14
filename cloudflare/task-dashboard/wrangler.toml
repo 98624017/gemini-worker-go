@@ -1,0 +1,20 @@
+name = "task-dashboard"
+main = "worker/index.ts"
+compatibility_date = "2026-04-01"
+account_id = "b90e43483db7d824b74157de8bf5c718"
+
+[site]
+bucket = "./dist"
+
+[vars]
+BACKEND_URL = "https://async.xinbao-ai.com"
+
+# Custom domain
+[[routes]]
+pattern = "task.xinbao-ai.com"
+custom_domain = true
+
+# wrangler secret put OWNER_HASH_SECRET
+[[kv_namespaces]]
+binding = "TASK_CACHE"
+id = "828a61e04e2340d2a0a5ef35ba931fdf"

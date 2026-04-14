@@ -80,6 +80,19 @@ stream_payload = (
     "data: [DONE]\n"
 )
 
+markdown_payload = {
+    "candidates": [{
+        "finishReason": "STOP",
+        "content": {
+            "parts": [
+                {"text": "before"},
+                {"text": "![img](https://example.com/path/demo.png)"},
+                {"text": "after"}
+            ]
+        }
+    }]
+}
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/healthz":
@@ -96,6 +109,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path.startswith("/v1beta/models/demo:generateContent"):
             payload = json.dumps(generate_payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if self.path.startswith("/v1beta/models/markdown:generateContent"):
+            payload = json.dumps(markdown_payload).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
@@ -148,6 +170,8 @@ wait_http "http://127.0.0.1:${MOCK_PORT}/healthz"
   R2_SECRET_ACCESS_KEY="test-secret" \
   R2_PUBLIC_BASE_URL="https://img.example.com" \
   R2_OBJECT_PREFIX="images" \
+  ADMIN_PASSWORD="pw" \
+  PUBLIC_BASE_URL="https://proxy.example.com" \
   go run .
 ) >"$TMP_DIR/go.log" 2>&1 &
 GO_PID=$!
@@ -164,6 +188,8 @@ GO_PID=$!
   R2_SECRET_ACCESS_KEY="test-secret" \
   R2_PUBLIC_BASE_URL="https://img.example.com" \
   R2_OBJECT_PREFIX="images" \
+  ADMIN_PASSWORD="pw" \
+  PUBLIC_BASE_URL="https://proxy.example.com" \
   "$HOME/.cargo/bin/cargo" run --manifest-path "$REPO_ROOT/Cargo.toml"
 ) >"$TMP_DIR/rust.log" 2>&1 &
 RUST_PID=$!
@@ -249,5 +275,29 @@ curl -fsS \
   | normalize_output_url_stream >"$TMP_DIR/rust-stream-url.txt"
 
 diff -u "$TMP_DIR/go-stream-url.txt" "$TMP_DIR/rust-stream-url.txt"
+
+MARKDOWN_REQ='{"output":"url","contents":[{"parts":[{"text":"hello"}]}]}'
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$MARKDOWN_REQ" \
+  "http://127.0.0.1:${GO_PORT}/v1beta/models/markdown:generateContent" \
+  | jq -S . >"$TMP_DIR/go-markdown.json"
+
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$MARKDOWN_REQ" \
+  "http://127.0.0.1:${RUST_PORT}/v1beta/models/markdown:generateContent" \
+  | jq -S . >"$TMP_DIR/rust-markdown.json"
+
+diff -u "$TMP_DIR/go-markdown.json" "$TMP_DIR/rust-markdown.json"
+
+AUTH_HEADER="Authorization: Basic $(printf 'user:pw' | base64)"
+curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${GO_PORT}/admin/api/stats" \
+  | jq -S '.totalDurationMs = 0' >"$TMP_DIR/go-admin-stats.json"
+curl -fsS -H "$AUTH_HEADER" "http://127.0.0.1:${RUST_PORT}/admin/api/stats" \
+  | jq -S '.totalDurationMs = 0' >"$TMP_DIR/rust-admin-stats.json"
+
+diff -u "$TMP_DIR/go-admin-stats.json" "$TMP_DIR/rust-admin-stats.json"
 
 echo "Go/Rust compatibility check passed."

@@ -1,11 +1,19 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use crate::image_io::{DEFAULT_MAX_IMAGE_BYTES, fetch_image_as_inline_data_with_options};
+use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
+use crate::cache::InlineDataUrlFetchService;
+use crate::image_io::REQUEST_MAX_IMAGE_BYTES;
+use crate::request_encode::encode_request_body;
+use crate::request_materialize::{
+    RequestMaterializeServices, materialize_request_images_with_services,
+};
+use crate::request_scan::scan_request_image_urls;
 
 const MAX_INLINE_DATA_URLS: usize = 5;
 
@@ -20,122 +28,209 @@ pub struct RewriteServices {
     pub image_client: reqwest::Client,
     pub max_image_bytes: usize,
     pub allow_private_networks: bool,
+    pub fetch_service: Option<Arc<InlineDataUrlFetchService>>,
+    pub cache_observer: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
 }
 
 impl Default for RewriteServices {
     fn default() -> Self {
         Self {
             image_client: reqwest::Client::new(),
-            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_image_bytes: REQUEST_MAX_IMAGE_BYTES,
             allow_private_networks: false,
+            fetch_service: None,
+            cache_observer: None,
         }
     }
 }
 
 pub fn scan_inline_data_urls(body: &Value) -> Result<InlineDataScan> {
-    let mut unique_urls = BTreeSet::new();
-    let mut total_refs = 0usize;
-
-    fn walk(node: &Value, unique_urls: &mut BTreeSet<String>, total_refs: &mut usize) -> Result<()> {
-        match node {
-            Value::Object(map) => {
-                if let Some(Value::Object(inline_data)) = map.get("inlineData") {
-                    if let Some(Value::String(data)) = inline_data.get("data") {
-                        if is_http_url(data) {
-                            *total_refs += 1;
-                            if *total_refs > MAX_INLINE_DATA_URLS {
-                                return Err(anyhow!("too many inlineData URLs"));
-                            }
-                            unique_urls.insert(data.clone());
-                        }
-                    }
-                }
-
-                for child in map.values() {
-                    walk(child, unique_urls, total_refs)?;
-                }
-            }
-            Value::Array(items) => {
-                for child in items {
-                    walk(child, unique_urls, total_refs)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
+    let refs = scan_request_image_urls(body)?;
+    if refs.len() > MAX_INLINE_DATA_URLS {
+        return Err(anyhow!("too many inlineData URLs"));
     }
 
-    walk(body, &mut unique_urls, &mut total_refs)?;
+    let mut unique_urls = HashSet::new();
+    for image_ref in &refs {
+        unique_urls.insert(image_ref.url.clone());
+    }
 
     Ok(InlineDataScan {
         unique_urls: unique_urls.into_iter().collect(),
-        total_refs,
+        total_refs: refs.len(),
     })
 }
 
-pub async fn rewrite_request_inline_data(
-    mut body: Value,
-    services: &RewriteServices,
-) -> Result<Value> {
+pub async fn rewrite_request_inline_data(body: Value, services: &RewriteServices) -> Result<Value> {
     let scan = scan_inline_data_urls(&body)?;
     if scan.total_refs == 0 {
         return Ok(body);
     }
 
-    let mut replacements = HashMap::new();
-    for raw_url in &scan.unique_urls {
-        let fetched = fetch_image_as_inline_data_with_options(
-            &services.image_client,
-            raw_url,
-            services.max_image_bytes,
-            services.allow_private_networks,
-        )
-        .await?;
-        replacements.insert(
-            raw_url.clone(),
-            (
-                fetched.mime_type,
-                STANDARD.encode(fetched.bytes.as_ref()),
-            ),
-        );
-    }
+    let runtime = compat_blob_runtime();
+    let materialized = materialize_request_images_with_services(
+        body,
+        &runtime,
+        &RequestMaterializeServices {
+            image_client: services.image_client.clone(),
+            max_image_bytes: services.max_image_bytes,
+            allow_private_networks: services.allow_private_networks,
+            fetch_service: services.fetch_service.clone(),
+            cache_observer: services.cache_observer.clone(),
+        },
+    )
+    .await?;
+    let encoded = encode_request_body(
+        materialized.request,
+        materialized.replacements.clone(),
+        &runtime,
+    )
+    .await?;
+    let bytes = runtime.read_bytes(&encoded.body_blob).await?;
 
-    // 二次遍历只做补丁回填，避免把可变引用跨 await 传播。
-    patch_inline_data_urls(&mut body, &replacements);
-    Ok(body)
+    for replacement in &materialized.replacements {
+        runtime.remove(&replacement.blob).await?;
+    }
+    runtime.remove(&encoded.body_blob).await?;
+
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn patch_inline_data_urls(
-    node: &mut Value,
-    replacements: &HashMap<String, (String, String)>,
-) {
-    match node {
-        Value::Object(map) => {
-            if let Some(Value::Object(inline_data)) = map.get_mut("inlineData") {
-                if let Some(Value::String(data)) = inline_data.get("data") {
-                    if let Some((mime_type, base64_data)) = replacements.get(data) {
-                        inline_data.insert("data".to_string(), Value::String(base64_data.clone()));
-                        inline_data.insert(
-                            "mimeType".to_string(),
-                            Value::String(mime_type.clone()),
-                        );
-                    }
-                }
-            }
+pub fn rewrite_aiapidev_request_body(mut body: Value) -> Value {
+    strip_output_fields(&mut body);
+    rewrite_aiapidev_value(body, "")
+}
 
-            for child in map.values_mut() {
-                patch_inline_data_urls(child, replacements);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                patch_inline_data_urls(child, replacements);
-            }
-        }
-        _ => {}
+fn rewrite_aiapidev_value(value: Value, path: &str) -> Value {
+    match value {
+        Value::Object(map) => rewrite_aiapidev_object(map, path),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| rewrite_aiapidev_value(item, &format!("{path}/{index}")))
+                .collect(),
+        ),
+        primitive => primitive,
     }
+}
+
+fn rewrite_aiapidev_object(map: Map<String, Value>, path: &str) -> Value {
+    if let Some((key, payload)) = rewrite_inline_data_payload(&map) {
+        let mut out = Map::new();
+        out.insert(key.to_string(), payload);
+        return Value::Object(out);
+    }
+
+    let mut out = Map::new();
+
+    if path.starts_with("/contents/") {
+        if let Some(role) = map.get("role").cloned() {
+            out.insert(
+                "role".to_string(),
+                rewrite_aiapidev_value(role, &format!("{path}/role")),
+            );
+        }
+        if let Some(parts) = map.get("parts").cloned() {
+            out.insert(
+                "parts".to_string(),
+                rewrite_aiapidev_value(parts, &format!("{path}/parts")),
+            );
+        }
+    }
+
+    for (key, child) in map {
+        if path.starts_with("/contents/") && matches!(key.as_str(), "role" | "parts") {
+            continue;
+        }
+        let rewritten_key = rewrite_aiapidev_key(&key);
+        let child_path = format!("{path}/{}", escape_json_pointer_token(&rewritten_key));
+        out.insert(rewritten_key, rewrite_aiapidev_value(child, &child_path));
+    }
+
+    Value::Object(out)
+}
+
+fn rewrite_inline_data_payload(map: &Map<String, Value>) -> Option<(&'static str, Value)> {
+    let inline_data = map
+        .get("inlineData")
+        .or_else(|| map.get("inline_data"))?
+        .as_object()?;
+    let data = inline_data.get("data")?.as_str()?;
+    let mime_type = inline_data
+        .get("mimeType")
+        .or_else(|| inline_data.get("mime_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("image/png");
+
+    if is_http_url(data) {
+        return Some((
+            "file_data",
+            serde_json::json!({
+                "file_uri": data,
+                "mime_type": mime_type,
+            }),
+        ));
+    }
+
+    Some((
+        "inline_data",
+        serde_json::json!({
+            "data": data,
+            "mime_type": mime_type,
+        }),
+    ))
+}
+
+fn rewrite_aiapidev_key(key: &str) -> String {
+    match key {
+        "generationConfig" => "generation_config".to_string(),
+        "imageConfig" => "image_config".to_string(),
+        "responseModalities" => "response_modalities".to_string(),
+        "aspectRatio" => "aspect_ratio".to_string(),
+        "imageSize" => "image_size".to_string(),
+        _ => key.to_string(),
+    }
+}
+
+fn strip_output_fields(body: &mut Value) {
+    if let Some(map) = body.as_object_mut() {
+        map.remove("output");
+    }
+
+    for pointer in [
+        "/generationConfig/imageConfig",
+        "/generation_config/image_config",
+    ] {
+        if let Some(image_config) = body.pointer_mut(pointer) {
+            if let Some(map) = image_config.as_object_mut() {
+                map.remove("output");
+            }
+        }
+    }
+}
+
+fn escape_json_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
 }
 
 fn is_http_url(value: &str) -> bool {
     value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn compat_blob_runtime() -> BlobRuntime {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    BlobRuntime::new(BlobRuntimeConfig {
+        inline_max_bytes: 8 * 1024 * 1024,
+        request_hot_budget_bytes: 24 * 1024 * 1024,
+        global_hot_budget_bytes: 384 * 1024 * 1024,
+        spill_dir: std::env::temp_dir()
+            .join(format!("rust-sync-proxy-request-rewrite-{unix_ms}-{id}")),
+    })
 }
