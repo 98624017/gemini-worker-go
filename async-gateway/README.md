@@ -74,6 +74,8 @@ go run ./cmd/banana-async-gateway
   默认 `256`
 - `TASK_POLL_RETRY_AFTER_SEC`
   默认 `10`
+- `TASK_POLL_BURST`
+  默认 `3`；控制同一个轮询 key 在单个 refill 周期内允许的突发查询次数
 - `NEWAPI_REQUEST_TIMEOUT_MS`
   默认 `1200000`
 - `SHUTDOWN_GRACE_PERIOD_SEC`

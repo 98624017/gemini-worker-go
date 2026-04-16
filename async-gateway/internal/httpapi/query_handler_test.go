@@ -146,10 +146,10 @@ func TestBatchGetTasksSuccessPreservesOrderAndHidesForeignTasks(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
-	if len(repo.batchIDs) != 4 {
-		t.Fatalf("batch ids len = %d, want %d", len(repo.batchIDs), 4)
+	if len(repo.batchIDs) != 5 {
+		t.Fatalf("batch ids len = %d, want %d", len(repo.batchIDs), 5)
 	}
-	if repo.batchIDs[0] != "task-b" || repo.batchIDs[1] != "task-a" || repo.batchIDs[2] != "task-x" || repo.batchIDs[3] != "task-missing" {
+	if repo.batchIDs[0] != "task-b" || repo.batchIDs[1] != "task-a" || repo.batchIDs[2] != "task-b" || repo.batchIDs[3] != "task-x" || repo.batchIDs[4] != "task-missing" {
 		t.Fatalf("unexpected batch ids = %#v", repo.batchIDs)
 	}
 
@@ -174,8 +174,8 @@ func TestBatchGetTasksSuccessPreservesOrderAndHidesForeignTasks(t *testing.T) {
 	if body.NextPollAfterMS != 3000 {
 		t.Fatalf("next_poll_after_ms = %d, want %d", body.NextPollAfterMS, 3000)
 	}
-	if len(body.Items) != 4 {
-		t.Fatalf("items len = %d, want %d", len(body.Items), 4)
+	if len(body.Items) != 5 {
+		t.Fatalf("items len = %d, want %d", len(body.Items), 5)
 	}
 	if body.Items[0].ID != "task-b" || body.Items[0].Object != "image.task" || body.Items[0].Model != "gemini-3-pro-image-preview" || body.Items[0].CreatedAt != 1773964800 || body.Items[0].Status != "succeeded" {
 		t.Fatalf("unexpected first item = %#v", body.Items[0])
@@ -183,17 +183,20 @@ func TestBatchGetTasksSuccessPreservesOrderAndHidesForeignTasks(t *testing.T) {
 	if body.Items[1].ID != "task-a" || body.Items[1].Object != "image.task" || body.Items[1].Model != "gemini-3-pro-image-preview" || body.Items[1].CreatedAt != 1773964801 || body.Items[1].Status != "running" {
 		t.Fatalf("unexpected second item = %#v", body.Items[1])
 	}
-	if body.Items[2].ID != "task-x" || body.Items[2].Object != "image.task" || body.Items[2].Status != "not_found" {
+	if body.Items[2].ID != "task-b" || body.Items[2].Object != "image.task" || body.Items[2].Model != "gemini-3-pro-image-preview" || body.Items[2].CreatedAt != 1773964800 || body.Items[2].Status != "succeeded" {
 		t.Fatalf("unexpected third item = %#v", body.Items[2])
 	}
-	if body.Items[2].Error["code"] != "not_found" {
-		t.Fatalf("unexpected third item error = %#v", body.Items[2].Error)
-	}
-	if body.Items[3].ID != "task-missing" || body.Items[3].Object != "image.task" || body.Items[3].Status != "not_found" {
+	if body.Items[3].ID != "task-x" || body.Items[3].Object != "image.task" || body.Items[3].Status != "not_found" {
 		t.Fatalf("unexpected fourth item = %#v", body.Items[3])
 	}
 	if body.Items[3].Error["code"] != "not_found" {
 		t.Fatalf("unexpected fourth item error = %#v", body.Items[3].Error)
+	}
+	if body.Items[4].ID != "task-missing" || body.Items[4].Object != "image.task" || body.Items[4].Status != "not_found" {
+		t.Fatalf("unexpected fifth item = %#v", body.Items[4])
+	}
+	if body.Items[4].Error["code"] != "not_found" {
+		t.Fatalf("unexpected fifth item error = %#v", body.Items[4].Error)
 	}
 }
 
@@ -313,6 +316,64 @@ func TestBatchGetTasksRateLimitedWhenPollingTooFast(t *testing.T) {
 	}
 	if rec2.Header().Get("Retry-After") != "3" {
 		t.Fatalf("Retry-After = %q, want %q", rec2.Header().Get("Retry-After"), "3")
+	}
+}
+
+func TestBatchGetTasksAllowsConfiguredBurstBeforeRateLimiting(t *testing.T) {
+	t.Parallel()
+
+	repo := &queryRepositoryStub{
+		batchTasks: map[string]*domain.Task{
+			"task-1": {
+				ID:        "task-1",
+				Status:    domain.TaskStatusRunning,
+				Model:     "gemini-3-pro-image-preview",
+				OwnerHash: mustOwnerHash(t),
+			},
+		},
+	}
+	now := time.Unix(1773964800, 0).UTC()
+	handler := NewQueryHandler(
+		config.Config{
+			OwnerHashSecret:       "owner-secret",
+			TaskPollRetryAfterSec: 3,
+			TaskPollBurst:         3,
+		},
+		repo,
+		taskcache.NewTaskCache(taskcache.Config{
+			Now: func() time.Time {
+				return now
+			},
+		}),
+		nil,
+	)
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/tasks/batch-get", strings.NewReader(`{"ids":["task-1"]}`))
+		req.Header.Set("Authorization", queryHandlerTestAuth)
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "127.0.0.1:1234"
+		rec := httptest.NewRecorder()
+
+		handler.BatchGetTasks(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("attempt %d status = %d, want %d", attempt, rec.Code, http.StatusOK)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/tasks/batch-get", strings.NewReader(`{"ids":["task-1"]}`))
+	req.Header.Set("Authorization", queryHandlerTestAuth)
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	handler.BatchGetTasks(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("fourth status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	}
+	if rec.Header().Get("Retry-After") != "3" {
+		t.Fatalf("Retry-After = %q, want %q", rec.Header().Get("Retry-After"), "3")
 	}
 }
 

@@ -54,7 +54,7 @@ func NewQueryHandler(cfg config.Config, repo queryRepository, cache *taskcache.T
 	if limiter == nil {
 		limiter = taskratelimit.NewLimiter(taskratelimit.Config{
 			RefillInterval: time.Duration(cfg.TaskPollRetryAfterSec) * time.Second,
-			Burst:          1,
+			Burst:          cfg.EffectiveTaskPollBurst(),
 		})
 	}
 
@@ -467,21 +467,16 @@ func parseBatchGetTaskIDs(r *http.Request) ([]string, error) {
 		return nil, fmt.Errorf("ids must not contain more than %d items", maxBatchGetTaskIDs)
 	}
 
-	uniqueIDs := make([]string, 0, len(request.IDs))
-	seen := make(map[string]struct{}, len(request.IDs))
+	normalizedIDs := make([]string, 0, len(request.IDs))
 	for _, rawID := range request.IDs {
 		taskID := strings.TrimSpace(rawID)
 		if taskID == "" {
 			return nil, fmt.Errorf("ids must not contain empty values")
 		}
-		if _, exists := seen[taskID]; exists {
-			continue
-		}
-		seen[taskID] = struct{}{}
-		uniqueIDs = append(uniqueIDs, taskID)
+		normalizedIDs = append(normalizedIDs, taskID)
 	}
 
-	return uniqueIDs, nil
+	return normalizedIDs, nil
 }
 
 func isPendingStatus(status domain.TaskStatus) bool {

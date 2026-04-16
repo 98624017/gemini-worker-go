@@ -51,7 +51,7 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 	queryCache := taskcache.NewTaskCache(taskcache.Config{})
 	queryLimiter := taskratelimit.NewLimiter(taskratelimit.Config{
 		RefillInterval: time.Duration(cfg.TaskPollRetryAfterSec) * time.Second,
-		Burst:          1,
+		Burst:          cfg.EffectiveTaskPollBurst(),
 	})
 	submitHandler, err := httpapi.NewSubmitHandler(cfg, repository, taskQueue)
 	if err != nil {

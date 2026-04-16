@@ -64,6 +64,9 @@ func TestLoadFromEnvInjectsDefaults(t *testing.T) {
 	if cfg.TaskPollRetryAfterSec != defaultTaskPollRetryAfterSec {
 		t.Fatalf("TaskPollRetryAfterSec = %d, want %d", cfg.TaskPollRetryAfterSec, defaultTaskPollRetryAfterSec)
 	}
+	if cfg.TaskPollBurst != defaultTaskPollBurst {
+		t.Fatalf("TaskPollBurst = %d, want %d", cfg.TaskPollBurst, defaultTaskPollBurst)
+	}
 	if cfg.NewAPIRequestTimeout != defaultNewAPIRequestTimeout {
 		t.Fatalf("NewAPIRequestTimeout = %s, want %s", cfg.NewAPIRequestTimeout, defaultNewAPIRequestTimeout)
 	}
@@ -84,11 +87,18 @@ func TestDefaultTaskPollRetryAfterIsTenSeconds(t *testing.T) {
 	}
 }
 
+func TestDefaultTaskPollBurstIsThree(t *testing.T) {
+	if defaultTaskPollBurst != 3 {
+		t.Fatalf("defaultTaskPollBurst = %d, want %d", defaultTaskPollBurst, 3)
+	}
+}
+
 func TestLoadFromEnvFallsBackToDefaultsForInvalidNumbers(t *testing.T) {
 	setValidEnv(t)
 	t.Setenv("MAX_INFLIGHT_TASKS", "bad")
 	t.Setenv("MAX_QUEUE_SIZE", "-1")
 	t.Setenv("TASK_POLL_RETRY_AFTER_SEC", "0")
+	t.Setenv("TASK_POLL_BURST", "0")
 	t.Setenv("POSTGRES_MAX_OPEN_CONNS", "invalid")
 	t.Setenv("POSTGRES_MAX_IDLE_CONNS", "-5")
 	t.Setenv("NEWAPI_REQUEST_TIMEOUT_MS", "oops")
@@ -117,6 +127,23 @@ func TestLoadFromEnvFallsBackToDefaultsForInvalidNumbers(t *testing.T) {
 	if cfg.TaskPollRetryAfterSec != defaultTaskPollRetryAfterSec {
 		t.Fatalf("TaskPollRetryAfterSec = %d, want %d", cfg.TaskPollRetryAfterSec, defaultTaskPollRetryAfterSec)
 	}
+	if cfg.TaskPollBurst != defaultTaskPollBurst {
+		t.Fatalf("TaskPollBurst = %d, want %d", cfg.TaskPollBurst, defaultTaskPollBurst)
+	}
+}
+
+func TestLoadFromEnvReadsTaskPollBurst(t *testing.T) {
+	setValidEnv(t)
+	t.Setenv("TASK_POLL_BURST", "5")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv() error = %v", err)
+	}
+
+	if cfg.TaskPollBurst != 5 {
+		t.Fatalf("TaskPollBurst = %d, want %d", cfg.TaskPollBurst, 5)
+	}
 }
 
 func setValidEnv(t *testing.T) {
@@ -129,6 +156,7 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("MAX_INFLIGHT_TASKS", "")
 	t.Setenv("MAX_QUEUE_SIZE", "")
 	t.Setenv("TASK_POLL_RETRY_AFTER_SEC", "")
+	t.Setenv("TASK_POLL_BURST", "")
 	t.Setenv("POSTGRES_MAX_OPEN_CONNS", "")
 	t.Setenv("POSTGRES_MAX_IDLE_CONNS", "")
 	t.Setenv("NEWAPI_REQUEST_TIMEOUT_MS", "")

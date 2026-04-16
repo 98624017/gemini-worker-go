@@ -16,6 +16,7 @@ const (
 	defaultMaxInflightTasks      = 32
 	defaultMaxQueueSize          = 256
 	defaultTaskPollRetryAfterSec = 10
+	defaultTaskPollBurst         = 3
 	defaultPostgresMaxOpenConns  = 20
 	defaultPostgresMaxIdleConns  = 10
 	defaultNewAPIRequestTimeout  = 20 * time.Minute
@@ -33,6 +34,7 @@ type Config struct {
 	MaxInflightTasks         int
 	MaxQueueSize             int
 	TaskPollRetryAfterSec    int
+	TaskPollBurst            int
 	NewAPIRequestTimeout     time.Duration
 	ShutdownGracePeriod      time.Duration
 }
@@ -45,6 +47,7 @@ func LoadFromEnv() (Config, error) {
 		MaxInflightTasks:      defaultMaxInflightTasks,
 		MaxQueueSize:          defaultMaxQueueSize,
 		TaskPollRetryAfterSec: defaultTaskPollRetryAfterSec,
+		TaskPollBurst:         defaultTaskPollBurst,
 		NewAPIRequestTimeout:  defaultNewAPIRequestTimeout,
 		ShutdownGracePeriod:   defaultShutdownGracePeriod,
 	}
@@ -82,12 +85,20 @@ func LoadFromEnv() (Config, error) {
 	cfg.MaxInflightTasks = getPositiveIntOrDefault("MAX_INFLIGHT_TASKS", defaultMaxInflightTasks)
 	cfg.MaxQueueSize = getPositiveIntOrDefault("MAX_QUEUE_SIZE", defaultMaxQueueSize)
 	cfg.TaskPollRetryAfterSec = getPositiveIntOrDefault("TASK_POLL_RETRY_AFTER_SEC", defaultTaskPollRetryAfterSec)
+	cfg.TaskPollBurst = getPositiveIntOrDefault("TASK_POLL_BURST", defaultTaskPollBurst)
 	cfg.PostgresMaxOpenConns = getPositiveIntOrDefault("POSTGRES_MAX_OPEN_CONNS", defaultPostgresMaxOpenConns)
 	cfg.PostgresMaxIdleConns = getPositiveIntOrDefault("POSTGRES_MAX_IDLE_CONNS", defaultPostgresMaxIdleConns)
 	cfg.NewAPIRequestTimeout = time.Duration(getPositiveIntOrDefault("NEWAPI_REQUEST_TIMEOUT_MS", int(defaultNewAPIRequestTimeout/time.Millisecond))) * time.Millisecond
 	cfg.ShutdownGracePeriod = time.Duration(getPositiveIntOrDefault("SHUTDOWN_GRACE_PERIOD_SEC", int(defaultShutdownGracePeriod/time.Second))) * time.Second
 
 	return cfg, nil
+}
+
+func (cfg Config) EffectiveTaskPollBurst() int {
+	if cfg.TaskPollBurst > 0 {
+		return cfg.TaskPollBurst
+	}
+	return defaultTaskPollBurst
 }
 
 func getEnvOrDefault(key, fallback string) string {
