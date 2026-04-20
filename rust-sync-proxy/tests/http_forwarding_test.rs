@@ -420,7 +420,10 @@ async fn image_generations_forwards_reference_images_and_returns_uploaded_urls()
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json_body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json_body["created"], 1_776_663_103);
-    assert_eq!(json_body["data"][0]["url"], "https://img.example.com/forwarded.png");
+    assert_eq!(
+        json_body["data"][0]["url"],
+        "https://img.example.com/forwarded.png"
+    );
     assert_eq!(json_body["usage"]["total_tokens"], 2048);
 
     let upstream_requests = state.upstream_requests.lock().await.clone();
@@ -434,7 +437,10 @@ async fn image_generations_forwards_reference_images_and_returns_uploaded_urls()
     assert!(upstream_json.get("image").is_none());
     assert!(upstream_json.get("images").is_none());
     assert_eq!(upstream_requests[0].api_key, "");
-    assert_eq!(upstream_requests[0].authorization, "Bearer real-upstream-key");
+    assert_eq!(
+        upstream_requests[0].authorization,
+        "Bearer real-upstream-key"
+    );
 
     assert_eq!(*state.upload_count.lock().await, 1);
 }
@@ -479,7 +485,10 @@ async fn image_generations_returns_bad_gateway_when_upstream_data_is_empty() {
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json_body: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json_body["error"]["message"], "upstream response missing data");
+    assert_eq!(
+        json_body["error"]["message"],
+        "upstream response missing data"
+    );
     assert_eq!(*state.upload_count.lock().await, 0);
 }
 

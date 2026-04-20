@@ -77,10 +77,7 @@ func ValidateImageGenerationRequest(r *http.Request) (ValidatedImageGenerationRe
 		}
 	}
 
-	referenceImageCount := 0
-	if images, ok := body["reference_images"].([]any); ok {
-		referenceImageCount = len(images)
-	}
+	referenceImageCount, _ := countReferenceImages(body)
 
 	return ValidatedImageGenerationRequest{
 		Model:               model,
@@ -95,14 +92,10 @@ func ValidateImageGenerationRequest(r *http.Request) (ValidatedImageGenerationRe
 }
 
 func normalizeImageGenerationRequestBody(body map[string]any) error {
-	referenceImages, err := extractReferenceImages(body)
+	_, err := countReferenceImages(body)
 	if err != nil {
 		return err
 	}
-
-	delete(body, "image")
-	delete(body, "images")
-	body["reference_images"] = referenceImages
 
 	responseFormat := "url"
 	if raw, ok := body["response_format"]; ok {
@@ -120,8 +113,8 @@ func normalizeImageGenerationRequestBody(body map[string]any) error {
 	return nil
 }
 
-func extractReferenceImages(body map[string]any) ([]any, error) {
-	for _, key := range []string{"reference_images", "images", "image"} {
+func countReferenceImages(body map[string]any) (int, error) {
+	for _, key := range []string{"image", "images", "reference_images"} {
 		raw, ok := body[key]
 		if !ok {
 			continue
@@ -129,25 +122,24 @@ func extractReferenceImages(body map[string]any) ([]any, error) {
 
 		items, ok := raw.([]any)
 		if !ok {
-			return nil, &RequestError{
+			return 0, &RequestError{
 				StatusCode: http.StatusBadRequest,
 				Code:       "invalid_reference_images",
 				Message:    key + " must be an array of absolute http/https URLs",
 			}
 		}
 		if len(items) > maxReferenceImages {
-			return nil, &RequestError{
+			return 0, &RequestError{
 				StatusCode: http.StatusBadRequest,
 				Code:       "too_many_reference_images",
 				Message:    fmt.Sprintf("reference image count exceeds %d", maxReferenceImages),
 			}
 		}
 
-		normalized := make([]any, 0, len(items))
 		for _, item := range items {
 			rawURL, ok := item.(string)
 			if !ok {
-				return nil, &RequestError{
+				return 0, &RequestError{
 					StatusCode: http.StatusBadRequest,
 					Code:       "invalid_reference_image_url",
 					Message:    "reference image URL must be a valid absolute URL",
@@ -155,7 +147,7 @@ func extractReferenceImages(body map[string]any) ([]any, error) {
 			}
 			trimmed := strings.TrimSpace(rawURL)
 			if trimmed == "" || len(trimmed) > maxReferenceURLLength {
-				return nil, &RequestError{
+				return 0, &RequestError{
 					StatusCode: http.StatusBadRequest,
 					Code:       "invalid_reference_image_url",
 					Message:    "reference image URL must be a valid absolute URL",
@@ -163,25 +155,24 @@ func extractReferenceImages(body map[string]any) ([]any, error) {
 			}
 			parsed, err := url.Parse(trimmed)
 			if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-				return nil, &RequestError{
+				return 0, &RequestError{
 					StatusCode: http.StatusBadRequest,
 					Code:       "invalid_reference_image_url",
 					Message:    "reference image URL must be a valid absolute URL",
 				}
 			}
 			if parsed.Scheme != "http" && parsed.Scheme != "https" {
-				return nil, &RequestError{
+				return 0, &RequestError{
 					StatusCode: http.StatusBadRequest,
 					Code:       "invalid_reference_image_scheme",
 					Message:    "reference image URL must use http or https",
 				}
 			}
-			normalized = append(normalized, trimmed)
 		}
-		return normalized, nil
+		return len(items), nil
 	}
 
-	return []any{}, nil
+	return 0, nil
 }
 
 func asRequestError(err error, target **RequestError) bool {

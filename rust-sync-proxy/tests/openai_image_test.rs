@@ -80,10 +80,7 @@ fn build_openai_image_response_preserves_upstream_created_timestamp() {
 #[test]
 fn sniff_image_mime_type_detects_known_formats() {
     let cases = [
-        (
-            &[137, 80, 78, 71, 13, 10, 26, 10][..],
-            Some("image/png"),
-        ),
+        (&[137, 80, 78, 71, 13, 10, 26, 10][..], Some("image/png")),
         (&[0xFF, 0xD8, 0xFF, 0xE0][..], Some("image/jpeg")),
         (
             &[b'R', b'I', b'F', b'F', 1, 2, 3, 4, b'W', b'E', b'B', b'P'][..],

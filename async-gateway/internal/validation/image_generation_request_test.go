@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestValidateImageGenerationRequestNormalizesImageAliases(t *testing.T) {
+func TestValidateImageGenerationRequestPreservesImageAliases(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -45,18 +45,12 @@ func TestValidateImageGenerationRequestNormalizesImageAliases(t *testing.T) {
 				t.Fatalf("json.Unmarshal() error = %v", err)
 			}
 
-			refImages, ok := normalized["reference_images"].([]any)
-			if !ok || len(refImages) != 1 || refImages[0] != "https://example.com/reference.png" {
-				t.Fatalf("reference_images = %#v", normalized["reference_images"])
-			}
 			if got := normalized["response_format"]; got != "url" {
 				t.Fatalf("response_format = %#v, want %q", got, "url")
 			}
-			if _, ok := normalized["image"]; ok {
-				t.Fatalf("normalized body must not retain image alias: %#v", normalized)
-			}
-			if _, ok := normalized["images"]; ok {
-				t.Fatalf("normalized body must not retain images alias: %#v", normalized)
+			images, ok := normalized[tc.aliasField].([]any)
+			if !ok || len(images) != 1 || images[0] != "https://example.com/reference.png" {
+				t.Fatalf("%s = %#v", tc.aliasField, normalized[tc.aliasField])
 			}
 		})
 	}
@@ -97,6 +91,38 @@ func TestValidateImageGenerationRequestRejectsMissingAuthorization(t *testing.T)
 
 	_, err := ValidateImageGenerationRequest(req)
 	assertImageRequestErrorStatus(t, err, http.StatusUnauthorized)
+}
+
+func TestValidateImageGenerationRequestPreservesImageAliasForForwarding(t *testing.T) {
+	t.Parallel()
+
+	req := newImageGenerationRequest(t, map[string]any{
+		"model": "gpt-image-2",
+		"image": []any{
+			"https://example.com/reference.png",
+		},
+		"response_format": "url",
+	}, "Bearer http://upstream.example|sk-image")
+
+	validated, err := ValidateImageGenerationRequest(req)
+	if err != nil {
+		t.Fatalf("ValidateImageGenerationRequest() error = %v", err)
+	}
+
+	var normalized map[string]any
+	if err := json.Unmarshal(validated.RequestBodyJSON, &normalized); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	if _, ok := normalized["image"]; !ok {
+		t.Fatalf("expected image alias to be preserved in forwarded body: %#v", normalized)
+	}
+	if _, ok := normalized["reference_images"]; ok {
+		t.Fatalf("did not expect reference_images in forwarded body: %#v", normalized)
+	}
+	if got := normalized["response_format"]; got != "url" {
+		t.Fatalf("response_format = %#v, want %q", got, "url")
+	}
 }
 
 func newImageGenerationRequest(t *testing.T, body map[string]any, authHeader string) *http.Request {

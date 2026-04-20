@@ -5,12 +5,12 @@ use std::{error::Error as StdError, fmt};
 use anyhow::{Result, anyhow};
 use axum::body::{Body, to_bytes};
 use axum::extract::{Path, Request, State};
-use base64::Engine;
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine;
 use serde_json::{Value, json};
 use tokio_util::io::ReaderStream;
 use url::{Url, form_urlencoded};
@@ -571,21 +571,20 @@ async fn image_generations_action(State(state): State<AppState>, request: Reques
             admin_entry.status_code = StatusCode::BAD_GATEWAY.as_u16();
             admin_entry.request_parse_ms += request_parse_ms;
             admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
-            let response =
-                if let Some(structured) = classify_standard_proxy_error_detail(&failure.error) {
-                    apply_structured_proxy_error(&mut admin_entry, &structured);
-                    build_structured_proxy_error_response(&structured)
-                } else if let Some(structured_error) =
-                    classify_standard_proxy_error(&failure.error)
-                {
-                    (StatusCode::BAD_GATEWAY, Json(structured_error)).into_response()
-                } else {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": {"code": 502, "message": failure.error.to_string()}})),
-                    )
-                        .into_response()
-                };
+            let response = if let Some(structured) =
+                classify_standard_proxy_error_detail(&failure.error)
+            {
+                apply_structured_proxy_error(&mut admin_entry, &structured);
+                build_structured_proxy_error_response(&structured)
+            } else if let Some(structured_error) = classify_standard_proxy_error(&failure.error) {
+                (StatusCode::BAD_GATEWAY, Json(structured_error)).into_response()
+            } else {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"code": 502, "message": failure.error.to_string()}})),
+                )
+                    .into_response()
+            };
             finalize_admin_response(&state, response, admin_entry).await
         }
     }
@@ -1097,10 +1096,13 @@ async fn forward_openai_image_request(
         .map(|value| value.image_urls.clone())
         .unwrap_or_default();
 
-    let (response, response_durations) =
-        handle_openai_image_response(upstream_response, state.uploader.as_ref(), state.config.as_ref())
-            .await
-            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+    let (response, response_durations) = handle_openai_image_response(
+        upstream_response,
+        state.uploader.as_ref(),
+        state.config.as_ref(),
+    )
+    .await
+    .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
     admin_entry.status_code = response.status().as_u16();
     admin_entry.response_process_ms = response_durations.response_process_ms;
     admin_entry.upload_ms = response_durations.upload_ms;
@@ -1254,7 +1256,8 @@ async fn handle_openai_image_response(
         let upload_result = uploader
             .upload_inline_data_base64(Arc::from(base64_image.as_str()), mime_type)
             .await?;
-        let final_url = build_openai_image_output_url(config, &upload_result.provider, &upload_result.url);
+        let final_url =
+            build_openai_image_output_url(config, &upload_result.provider, &upload_result.url);
         uploaded.push(crate::openai_image::UploadedImage { url: final_url });
     }
     let upload_ms = upload_started.elapsed().as_millis() as i64;
@@ -1754,17 +1757,14 @@ fn query_contains_output_url(query: Option<&str>) -> bool {
 }
 
 fn extract_openai_b64_json_entries(body: &Value) -> Result<Vec<String>> {
-    let data = body
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            StructuredProxyError::new(
-                "upstream response missing data",
-                "rewrite_openai_image_response",
-                "missing_data",
-                "upstream response missing data array",
-            )
-        })?;
+    let data = body.get("data").and_then(Value::as_array).ok_or_else(|| {
+        StructuredProxyError::new(
+            "upstream response missing data",
+            "rewrite_openai_image_response",
+            "missing_data",
+            "upstream response missing data array",
+        )
+    })?;
     if data.is_empty() {
         return Err(StructuredProxyError::new(
             "upstream response missing data",
