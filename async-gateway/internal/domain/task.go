@@ -13,23 +13,31 @@ const (
 	TaskStatusUncertain TaskStatus = "uncertain"
 )
 
+type RequestProtocol string
+
+const (
+	RequestProtocolGeminiGenerateContent RequestProtocol = "gemini_generate_content"
+	RequestProtocolOpenAIImageGeneration RequestProtocol = "openai_image_generation"
+)
+
 type Task struct {
-	ID                  string         `json:"id"`
-	Status              TaskStatus     `json:"status"`
-	Model               string         `json:"model"`
-	OwnerHash           string         `json:"-"`
-	RequestPath         string         `json:"-"`
-	RequestQuery        string         `json:"-"`
-	WorkerID            string         `json:"-"`
-	HeartbeatAt         *time.Time     `json:"-"`
-	RequestDispatchedAt *time.Time     `json:"-"`
-	ResultSummary       *ResultSummary `json:"result_summary,omitempty"`
-	ErrorCode           string         `json:"error_code,omitempty"`
-	ErrorMessage        string         `json:"error_message,omitempty"`
-	TransportUncertain  bool           `json:"transport_uncertain,omitempty"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
-	FinishedAt          *time.Time     `json:"finished_at,omitempty"`
+	ID                  string          `json:"id"`
+	Status              TaskStatus      `json:"status"`
+	Model               string          `json:"model"`
+	RequestProtocol     RequestProtocol `json:"-"`
+	OwnerHash           string          `json:"-"`
+	RequestPath         string          `json:"-"`
+	RequestQuery        string          `json:"-"`
+	WorkerID            string          `json:"-"`
+	HeartbeatAt         *time.Time      `json:"-"`
+	RequestDispatchedAt *time.Time      `json:"-"`
+	ResultSummary       *ResultSummary  `json:"result_summary,omitempty"`
+	ErrorCode           string          `json:"error_code,omitempty"`
+	ErrorMessage        string          `json:"error_message,omitempty"`
+	TransportUncertain  bool            `json:"transport_uncertain,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	FinishedAt          *time.Time      `json:"finished_at,omitempty"`
 }
 
 type TaskSummary struct {

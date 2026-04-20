@@ -31,7 +31,40 @@ func TestCreateAcceptedTask(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectExec(regexp.QuoteMeta(insertTaskSQL)).
-		WithArgs(task.ID, task.Status, task.Model, task.OwnerHash, task.RequestPath, task.RequestQuery).
+		WithArgs(task.ID, task.Status, task.Model, task.OwnerHash, task.RequestPath, task.RequestQuery, task.RequestProtocol).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(regexp.QuoteMeta(insertTaskPayloadSQL)).
+		WithArgs(payload.TaskID, payload.RequestBodyJSON, payload.ForwardHeaders, payload.AuthorizationCrypt, payload.ExpiresAt).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	if err := repo.CreateAcceptedTask(context.Background(), task, payload); err != nil {
+		t.Fatalf("CreateAcceptedTask() error = %v", err)
+	}
+}
+
+func TestCreateAcceptedTaskIncludesRequestProtocol(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(strings.ToLower(insertTaskSQL), "request_protocol") {
+		t.Fatalf("tasks insert must contain request_protocol")
+	}
+
+	repo, mock := newRepositoryForTest(t)
+	task, payload := makeAcceptedFixture(t)
+	task.RequestProtocol = domain.RequestProtocolOpenAIImageGeneration
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(insertTaskSQL)).
+		WithArgs(
+			task.ID,
+			task.Status,
+			task.Model,
+			task.OwnerHash,
+			task.RequestPath,
+			task.RequestQuery,
+			task.RequestProtocol,
+		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec(regexp.QuoteMeta(insertTaskPayloadSQL)).
 		WithArgs(payload.TaskID, payload.RequestBodyJSON, payload.ForwardHeaders, payload.AuthorizationCrypt, payload.ExpiresAt).
@@ -158,10 +191,10 @@ func TestGetTaskByID(t *testing.T) {
 
 	rows := mock.NewRows([]string{
 		"task_id", "status", "model", "owner_hash", "request_path", "request_query",
-		"worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
+		"request_protocol", "worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
 		"error_code", "error_message", "transport_uncertain", "created_at", "updated_at", "finished_at",
 	}).AddRow(
-		"task-1", "succeeded", "gemini-3-pro-image-preview", "owner", "/v1beta/models/gemini-3-pro-image-preview:generateContent", "output=url",
+		"task-1", "succeeded", "gemini-3-pro-image-preview", "owner", "/v1beta/models/gemini-3-pro-image-preview:generateContent", "output=url", "gemini_generate_content",
 		"worker-1", nil, createdAt, summary, "", "", false, createdAt, updatedAt, finishedAt,
 	)
 
@@ -178,6 +211,35 @@ func TestGetTaskByID(t *testing.T) {
 	}
 	if task.ResultSummary == nil || len(task.ResultSummary.ImageURLs) != 1 {
 		t.Fatalf("expected parsed result summary, got %#v", task.ResultSummary)
+	}
+}
+
+func TestGetTaskByIDLoadsRequestProtocol(t *testing.T) {
+	t.Parallel()
+
+	repo, mock := newRepositoryForTest(t)
+	createdAt := time.Date(2026, 3, 19, 10, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(5 * time.Second)
+
+	rows := mock.NewRows([]string{
+		"task_id", "status", "model", "owner_hash", "request_path", "request_query",
+		"request_protocol", "worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
+		"error_code", "error_message", "transport_uncertain", "created_at", "updated_at", "finished_at",
+	}).AddRow(
+		"task-1", "accepted", "gpt-image-1", "owner", "/v1/images/generations", "", "openai_image_generation",
+		"", nil, nil, []byte(`{}`), "", "", false, createdAt, updatedAt, nil,
+	)
+
+	mock.ExpectQuery(regexp.QuoteMeta(getTaskByIDSQL)).
+		WithArgs("task-1").
+		WillReturnRows(rows)
+
+	task, err := repo.GetTaskByID(context.Background(), "task-1")
+	if err != nil {
+		t.Fatalf("GetTaskByID() error = %v", err)
+	}
+	if task.RequestProtocol != domain.RequestProtocolOpenAIImageGeneration {
+		t.Fatalf("task.RequestProtocol = %q, want %q", task.RequestProtocol, domain.RequestProtocolOpenAIImageGeneration)
 	}
 }
 
@@ -209,10 +271,10 @@ func TestRepositoryGetTasksByIDs(t *testing.T) {
 
 		rows := mock.NewRows([]string{
 			"task_id", "status", "model", "owner_hash", "request_path", "request_query",
-			"worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
+			"request_protocol", "worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
 			"error_code", "error_message", "transport_uncertain", "created_at", "updated_at", "finished_at",
 		}).AddRow(
-			"task-1", "succeeded", "gemini-3-pro-image-preview", "owner", "/v1beta/models/gemini-3-pro-image-preview:generateContent", "output=url",
+			"task-1", "succeeded", "gemini-3-pro-image-preview", "owner", "/v1beta/models/gemini-3-pro-image-preview:generateContent", "output=url", "gemini_generate_content",
 			"worker-1", nil, createdAt, summary, "", "", false, createdAt, updatedAt, finishedAt,
 		)
 
@@ -279,10 +341,10 @@ func TestFindRecoverableTasks(t *testing.T) {
 	staleBefore := time.Date(2026, 3, 19, 9, 0, 0, 0, time.UTC)
 	rows := mock.NewRows([]string{
 		"task_id", "status", "model", "owner_hash", "request_path", "request_query",
-		"worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
+		"request_protocol", "worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
 		"error_code", "error_message", "transport_uncertain", "created_at", "updated_at", "finished_at", "has_payload",
 	}).AddRow(
-		"task-1", "accepted", "gemini-3-pro-image-preview", "owner", "/v1beta/models/gemini-3-pro-image-preview:generateContent", "output=url",
+		"task-1", "accepted", "gemini-3-pro-image-preview", "owner", "/v1beta/models/gemini-3-pro-image-preview:generateContent", "output=url", "gemini_generate_content",
 		"", nil, nil, []byte(`{}`), "", "", false, staleBefore.Add(-1*time.Hour), staleBefore.Add(-30*time.Minute), nil, true,
 	)
 
@@ -359,12 +421,13 @@ func makeAcceptedFixture(t *testing.T) (*domain.Task, *domain.TaskPayload) {
 
 	expiresAt := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
 	return &domain.Task{
-			ID:           "task-1",
-			Status:       domain.TaskStatusAccepted,
-			Model:        "gemini-3-pro-image-preview",
-			OwnerHash:    "owner",
-			RequestPath:  "/v1beta/models/gemini-3-pro-image-preview:generateContent",
-			RequestQuery: "output=url",
+			ID:              "task-1",
+			Status:          domain.TaskStatusAccepted,
+			Model:           "gemini-3-pro-image-preview",
+			RequestProtocol: domain.RequestProtocolGeminiGenerateContent,
+			OwnerHash:       "owner",
+			RequestPath:     "/v1beta/models/gemini-3-pro-image-preview:generateContent",
+			RequestQuery:    "output=url",
 		}, &domain.TaskPayload{
 			TaskID:             "task-1",
 			RequestBodyJSON:    []byte(`{"contents":[{"parts":[{"text":"draw cat"}]}]}`),

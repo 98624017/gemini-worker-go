@@ -41,8 +41,9 @@ INSERT INTO tasks (
 	model,
 	owner_hash,
 	request_path,
-	request_query
-) VALUES ($1, $2, $3, $4, $5, $6)
+	request_query,
+	request_protocol
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
 `
 	insertTaskPayloadSQL = `
 INSERT INTO task_payloads (
@@ -135,6 +136,7 @@ SELECT
 	owner_hash,
 	request_path,
 	request_query,
+	request_protocol,
 	worker_id,
 	heartbeat_at,
 	request_dispatched_at,
@@ -156,6 +158,7 @@ SELECT
 	owner_hash,
 	request_path,
 	request_query,
+	request_protocol,
 	worker_id,
 	heartbeat_at,
 	request_dispatched_at,
@@ -222,6 +225,7 @@ SELECT
 	t.owner_hash,
 	t.request_path,
 	t.request_query,
+	t.request_protocol,
 	t.worker_id,
 	t.heartbeat_at,
 	t.request_dispatched_at,
@@ -300,6 +304,7 @@ func (r *Repository) CreateAcceptedTask(ctx context.Context, task *domain.Task, 
 		task.OwnerHash,
 		task.RequestPath,
 		task.RequestQuery,
+		normalizeRequestProtocol(task.RequestProtocol),
 	); err != nil {
 		return fmt.Errorf("insert tasks row: %w", err)
 	}
@@ -528,6 +533,7 @@ func scanTask(row interface {
 }) (*domain.Task, error) {
 	task := &domain.Task{}
 	var summaryJSON []byte
+	var requestProtocol string
 	var heartbeatAt sql.NullTime
 	var requestDispatchedAt sql.NullTime
 	var finishedAt sql.NullTime
@@ -538,6 +544,7 @@ func scanTask(row interface {
 		&task.OwnerHash,
 		&task.RequestPath,
 		&task.RequestQuery,
+		&requestProtocol,
 		&task.WorkerID,
 		&heartbeatAt,
 		&requestDispatchedAt,
@@ -551,6 +558,7 @@ func scanTask(row interface {
 	); err != nil {
 		return nil, err
 	}
+	task.RequestProtocol = normalizeRequestProtocol(domain.RequestProtocol(requestProtocol))
 	summary, err := parseResultSummary(summaryJSON)
 	if err != nil {
 		return nil, err
@@ -573,6 +581,7 @@ func scanRecoverableTask(row interface {
 }) (*domain.Task, bool, error) {
 	task := &domain.Task{}
 	var summaryJSON []byte
+	var requestProtocol string
 	var hasPayload bool
 	var heartbeatAt sql.NullTime
 	var requestDispatchedAt sql.NullTime
@@ -584,6 +593,7 @@ func scanRecoverableTask(row interface {
 		&task.OwnerHash,
 		&task.RequestPath,
 		&task.RequestQuery,
+		&requestProtocol,
 		&task.WorkerID,
 		&heartbeatAt,
 		&requestDispatchedAt,
@@ -598,6 +608,7 @@ func scanRecoverableTask(row interface {
 	); err != nil {
 		return nil, false, fmt.Errorf("scan recoverable task: %w", err)
 	}
+	task.RequestProtocol = normalizeRequestProtocol(domain.RequestProtocol(requestProtocol))
 	summary, err := parseResultSummary(summaryJSON)
 	if err != nil {
 		return nil, false, err
@@ -626,4 +637,11 @@ func parseResultSummary(summaryJSON []byte) (*domain.ResultSummary, error) {
 		return nil, fmt.Errorf("unmarshal result summary: %w", err)
 	}
 	return &summary, nil
+}
+
+func normalizeRequestProtocol(protocol domain.RequestProtocol) domain.RequestProtocol {
+	if strings.TrimSpace(string(protocol)) == "" {
+		return domain.RequestProtocolGeminiGenerateContent
+	}
+	return protocol
 }
