@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -69,6 +70,63 @@ func TestImageSubmitQueueFullReturns503(t *testing.T) {
 	}
 	if repo.finishFailedID != "img_testtask123" || repo.finishFailedCode != "queue_full" {
 		t.Fatalf("expected queue_full mark failed, got id=%q code=%q", repo.finishFailedID, repo.finishFailedCode)
+	}
+}
+
+func TestImageSubmitValidationFailureReturns4xx(t *testing.T) {
+	t.Parallel()
+
+	handler := newImageSubmitHandlerForTest(t, &submitRepositoryStub{}, &submitQueueStub{allowEnqueue: true})
+	req := newImageSubmitRequest(t, map[string]any{
+		"model":           "gpt-image-1",
+		"response_format": "b64_json",
+	}, "Bearer sk-live")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestImageSubmitCreateAcceptedTaskFailureReturns500(t *testing.T) {
+	t.Parallel()
+
+	repo := &submitRepositoryStub{createErr: errors.New("db down")}
+	handler := newImageSubmitHandlerForTest(t, repo, &submitQueueStub{allowEnqueue: true})
+	req := newImageSubmitRequest(t, map[string]any{
+		"model": "gpt-image-1",
+		"image": []any{
+			"https://example.com/reference.png",
+		},
+	}, "Bearer sk-live")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
+	}
+}
+
+func TestImageSubmitMarkQueuedFailureReturns500(t *testing.T) {
+	t.Parallel()
+
+	repo := &submitRepositoryStub{markQueuedErr: errors.New("mark queued failed")}
+	handler := newImageSubmitHandlerForTest(t, repo, &submitQueueStub{allowEnqueue: true})
+	req := newImageSubmitRequest(t, map[string]any{
+		"model": "gpt-image-1",
+		"image": []any{
+			"https://example.com/reference.png",
+		},
+	}, "Bearer sk-live")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 }
 
