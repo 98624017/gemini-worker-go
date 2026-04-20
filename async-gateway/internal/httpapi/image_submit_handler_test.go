@@ -44,6 +44,34 @@ func TestImageSubmitAccepted(t *testing.T) {
 	}
 }
 
+func TestImageSubmitQueueFullReturns503(t *testing.T) {
+	t.Parallel()
+
+	repo := &submitRepositoryStub{}
+	queue := &submitQueueStub{allowEnqueue: false}
+	handler := newImageSubmitHandlerForTest(t, repo, queue)
+
+	req := newImageSubmitRequest(t, map[string]any{
+		"model": "gpt-image-1",
+		"image": []any{
+			"https://example.com/reference.png",
+		},
+	}, "Bearer sk-live")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "3" {
+		t.Fatalf("Retry-After = %q, want %q", got, "3")
+	}
+	if repo.finishFailedID != "img_testtask123" || repo.finishFailedCode != "queue_full" {
+		t.Fatalf("expected queue_full mark failed, got id=%q code=%q", repo.finishFailedID, repo.finishFailedCode)
+	}
+}
+
 func newImageSubmitHandlerForTest(t *testing.T, repo submitRepository, queue submitQueue) *ImageSubmitHandler {
 	t.Helper()
 

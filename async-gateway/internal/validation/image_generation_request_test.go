@@ -62,6 +62,43 @@ func TestValidateImageGenerationRequestNormalizesImageAliases(t *testing.T) {
 	}
 }
 
+func TestValidateImageGenerationRequestRejectsInvalidResponseFormat(t *testing.T) {
+	t.Parallel()
+
+	req := newImageGenerationRequest(t, map[string]any{
+		"model":           "gpt-image-1",
+		"response_format": "b64_json",
+	}, "Bearer sk-image")
+
+	_, err := ValidateImageGenerationRequest(req)
+	assertImageRequestErrorStatus(t, err, http.StatusBadRequest)
+}
+
+func TestValidateImageGenerationRequestRejectsNonHTTPReferenceImageURL(t *testing.T) {
+	t.Parallel()
+
+	req := newImageGenerationRequest(t, map[string]any{
+		"model": "gpt-image-1",
+		"image": []any{
+			"ftp://example.com/reference.png",
+		},
+	}, "Bearer sk-image")
+
+	_, err := ValidateImageGenerationRequest(req)
+	assertImageRequestErrorStatus(t, err, http.StatusBadRequest)
+}
+
+func TestValidateImageGenerationRequestRejectsMissingAuthorization(t *testing.T) {
+	t.Parallel()
+
+	req := newImageGenerationRequest(t, map[string]any{
+		"model": "gpt-image-1",
+	}, "")
+
+	_, err := ValidateImageGenerationRequest(req)
+	assertImageRequestErrorStatus(t, err, http.StatusUnauthorized)
+}
+
 func newImageGenerationRequest(t *testing.T, body map[string]any, authHeader string) *http.Request {
 	t.Helper()
 
@@ -76,4 +113,20 @@ func newImageGenerationRequest(t *testing.T, body map[string]any, authHeader str
 		req.Header.Set("Authorization", authHeader)
 	}
 	return req
+}
+
+func assertImageRequestErrorStatus(t *testing.T, err error, wantStatus int) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatalf("expected validation error")
+	}
+
+	requestErr, ok := err.(*RequestError)
+	if !ok {
+		t.Fatalf("error type = %T, want *RequestError", err)
+	}
+	if requestErr.StatusCode != wantStatus {
+		t.Fatalf("StatusCode = %d, want %d", requestErr.StatusCode, wantStatus)
+	}
 }

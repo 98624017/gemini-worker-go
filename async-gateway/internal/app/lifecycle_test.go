@@ -62,6 +62,32 @@ func TestRunShutdownForcesUncertainWhenGracePeriodExpires(t *testing.T) {
 	}
 }
 
+func TestRunShutdownDrainsPrimaryAndExtraSubmitGates(t *testing.T) {
+	t.Parallel()
+
+	primaryGate := NewDrainingSubmitHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}), 3)
+	imageGate := NewDrainingSubmitHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}), 3)
+	server := &lifecycleServerStub{}
+	logger := log.New(io.Discard, "", 0)
+
+	if err := runShutdown(context.Background(), logger, primaryGate, nil, nil, server.Shutdown, imageGate); err != nil {
+		t.Fatalf("runShutdown() error = %v", err)
+	}
+	if !primaryGate.draining.Load() {
+		t.Fatalf("expected primary gate to enter draining mode")
+	}
+	if !imageGate.draining.Load() {
+		t.Fatalf("expected image gate to enter draining mode")
+	}
+	if !server.shutdownCalled {
+		t.Fatalf("expected server shutdown")
+	}
+}
+
 type lifecycleWorkersStub struct {
 	closeQueueCalled bool
 }

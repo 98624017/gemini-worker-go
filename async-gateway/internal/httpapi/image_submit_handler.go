@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -105,8 +106,8 @@ func (h *ImageSubmitHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeSubmitValidationError(w http.ResponseWriter, err error) {
-	requestErr, ok := err.(*validation.RequestError)
-	if !ok {
+	var requestErr *validation.RequestError
+	if !errors.As(err, &requestErr) {
 		writeError(w, http.StatusInternalServerError, "unknown_error", err.Error())
 		return
 	}
