@@ -80,6 +80,9 @@ func (s *Scanner) handleTask(ctx context.Context, item store.RecoverableTask) er
 	if item.Task == nil {
 		return nil
 	}
+	if item.Task.Status == domain.TaskStatusRunning && !s.isRunningTaskStale(item.Task) {
+		return nil
+	}
 	if requiresPayload(item.Task.Status) && !item.HasPayload {
 		return s.repo.FinishFailed(ctx, item.Task.ID, "recovery_payload_missing", recoveryPayloadMissingMessage)
 	}
@@ -98,6 +101,18 @@ func (s *Scanner) handleTask(ctx context.Context, item store.RecoverableTask) er
 	}
 	s.logger.Printf("event=recovery_requeued task_id=%s status=%s", item.Task.ID, item.Task.Status)
 	return nil
+}
+
+func (s *Scanner) isRunningTaskStale(task *domain.Task) bool {
+	if task == nil || task.Status != domain.TaskStatusRunning {
+		return false
+	}
+
+	cutoff := s.now().UTC().Add(-s.staleThreshold)
+	if task.HeartbeatAt == nil {
+		return true
+	}
+	return task.HeartbeatAt.Before(cutoff)
 }
 
 func requiresPayload(status domain.TaskStatus) bool {

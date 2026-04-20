@@ -398,6 +398,9 @@ func TestListTasksByOwner(t *testing.T) {
 func TestFindRecoverableTasks(t *testing.T) {
 	t.Parallel()
 
+	assertSQLContains(t, findRecoverableTasksSQL, "t.heartbeat_at < $1")
+	assertSQLNotContains(t, findRecoverableTasksSQL, "OR t.request_dispatched_at IS NOT NULL")
+
 	repo, mock := newRepositoryForTest(t)
 	staleBefore := time.Date(2026, 3, 19, 9, 0, 0, 0, time.UTC)
 	rows := mock.NewRows([]string{
@@ -508,5 +511,12 @@ func assertSQLContains(t *testing.T, sql, needle string) {
 	t.Helper()
 	if !strings.Contains(sql, needle) {
 		t.Fatalf("SQL missing %q:\n%s", needle, sql)
+	}
+}
+
+func assertSQLNotContains(t *testing.T, sql, needle string) {
+	t.Helper()
+	if strings.Contains(sql, needle) {
+		t.Fatalf("SQL should not contain %q:\n%s", needle, sql)
 	}
 }

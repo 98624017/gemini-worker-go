@@ -317,6 +317,17 @@ ghcr.io/<owner>/banana-async-gateway
 - 需要仓库 Actions 具备包写入权限；若组织策略收紧，请确认
   `packages: write` 已允许
 
+镜像使用建议：
+
+- 开发 / 自测环境优先使用 `main`
+  - 适合跟随 `main` 主线最新代码验证
+- 灰度 / 回归环境优先使用 `sha-<shortsha>`
+  - 适合锁定单次构建产物，便于追踪和回滚
+- 正式环境优先使用 `v1.2.3` 这类显式版本 tag
+  - 只有推送 `v*` tag 时才会刷新 `latest`
+- 不要把 `latest` 视为“最新主线”
+  - 在当前 workflow 里，`latest` 表示最近一次正式打 tag 的版本，不等于当前 `main`
+
 当前镜像架构：
 
 - 与现有 `Dockerfile` 保持一致，默认发布 `linux/amd64`

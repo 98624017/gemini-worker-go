@@ -84,6 +84,48 @@ func TestScannerMarksDispatchedRunningTaskUncertain(t *testing.T) {
 	}
 }
 
+func TestScannerSkipsFreshDispatchedRunningTask(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1773964800, 0).UTC()
+	freshHeartbeat := now.Add(-30 * time.Second)
+	dispatchedAt := now.Add(-15 * time.Second)
+	repo := &recoveryRepositoryStub{
+		items: []store.RecoverableTask{{
+			Task: &domain.Task{
+				ID:                  "task-1",
+				Status:              domain.TaskStatusRunning,
+				HeartbeatAt:         &freshHeartbeat,
+				RequestDispatchedAt: &dispatchedAt,
+			},
+			HasPayload: true,
+		}},
+	}
+	queueStub := &recoveryQueueStub{}
+	scanner := NewScanner(repo, queueStub, Config{
+		StaleThreshold: 5 * time.Minute,
+		Now: func() time.Time {
+			return now
+		},
+	})
+
+	if err := scanner.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if repo.markUncertainID != "" {
+		t.Fatalf("fresh running task should not be marked uncertain, got %#v", repo)
+	}
+	if len(repo.markQueuedIDs) != 0 {
+		t.Fatalf("fresh running task should not be requeued, got %#v", repo.markQueuedIDs)
+	}
+	if repo.finishFailedID != "" {
+		t.Fatalf("fresh running task should not be failed, got %#v", repo)
+	}
+	if len(queueStub.items) != 0 {
+		t.Fatalf("fresh running task should not be enqueued, got %#v", queueStub.items)
+	}
+}
+
 func TestScannerMarksMissingPayloadFailed(t *testing.T) {
 	t.Parallel()
 

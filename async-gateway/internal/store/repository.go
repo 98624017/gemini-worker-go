@@ -239,19 +239,18 @@ SELECT
 	(tp.task_id IS NOT NULL) AS has_payload
 FROM tasks t
 LEFT JOIN task_payloads tp ON tp.task_id = t.task_id
-WHERE
-	t.status IN ('accepted', 'queued')
-	OR (
-		t.status = 'running'
-		AND (
-			t.heartbeat_at IS NULL
-			OR t.heartbeat_at < $1
-			OR t.request_dispatched_at IS NOT NULL
+	WHERE
+		t.status IN ('accepted', 'queued')
+		OR (
+			t.status = 'running'
+			AND (
+				t.heartbeat_at IS NULL
+				OR t.heartbeat_at < $1
+			)
 		)
-	)
-ORDER BY t.created_at ASC
-LIMIT $2
-`
+	ORDER BY t.created_at ASC
+	LIMIT $2
+	`
 	deleteExpiredTasksBatchSQL = `
 WITH victims AS (
 	SELECT task_id
