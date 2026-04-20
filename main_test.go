@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -27,6 +28,38 @@ type recordingTransport struct {
 	statusCode  int
 	contentType string
 	body        []byte
+}
+
+type upstreamCaptureTransport struct {
+	mu        sync.Mutex
+	lastURL   string
+	auth      string
+	apiKey    string
+	callCount int
+}
+
+func (t *upstreamCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.lastURL = req.URL.String()
+	t.auth = req.Header.Get("Authorization")
+	t.apiKey = req.Header.Get("x-goog-api-key")
+	t.callCount++
+	t.mu.Unlock()
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+		Request:    req,
+	}
+	resp.Header.Set("Content-Type", "application/json")
+	return resp, nil
+}
+
+func (t *upstreamCaptureTransport) snapshot() (lastURL string, auth string, apiKey string, callCount int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastURL, t.auth, t.apiKey, t.callCount
 }
 
 func TestLoadConfigWithEnv_DefaultImageHostModeIsLegacy(t *testing.T) {
@@ -100,6 +133,89 @@ func TestLoadConfigWithEnv_R2ModeRejectsInvalidPublicBaseURL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "R2_PUBLIC_BASE_URL") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleGeminiRequest_InvalidDualUpstreamToken_Returns400(t *testing.T) {
+	rt := &upstreamCaptureTransport{}
+	app := &App{
+		Config:         Config{UpstreamBaseURL: "https://default.example", UpstreamAPIKey: "env-key"},
+		UpstreamClient: &http.Client{Transport: rt},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/v1beta/models/test:generateContent", strings.NewReader(`{"contents":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", "https://a.example|key-a,not-valid")
+	rr := httptest.NewRecorder()
+
+	app.handleGeminiRequest(rr, req, false)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	if _, _, _, calls := rt.snapshot(); calls != 0 {
+		t.Fatalf("upstream should not be called, got=%d", calls)
+	}
+	if !strings.Contains(rr.Body.String(), "Invalid upstream apiKey") {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+func TestHandleGeminiRequest_DualUpstreamToken_UsesSecondConfigFor4K(t *testing.T) {
+	rt := &upstreamCaptureTransport{}
+	app := &App{
+		Config:         Config{UpstreamBaseURL: "https://default.example", UpstreamAPIKey: "env-key"},
+		UpstreamClient: &http.Client{Transport: rt},
+	}
+
+	reqBody := `{"generationConfig":{"imageConfig":{"imageSize":"4K"}},"contents":[]}`
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/v1beta/models/test:generateContent", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", "https://a.example|key-a,https://b.example|key-b")
+	rr := httptest.NewRecorder()
+
+	app.handleGeminiRequest(rr, req, false)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d want=%d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	lastURL, auth, apiKey, calls := rt.snapshot()
+	if calls != 1 {
+		t.Fatalf("upstream calls=%d want=1", calls)
+	}
+	if lastURL != "https://b.example/v1beta/models/test:generateContent" {
+		t.Fatalf("lastURL=%q want=%q", lastURL, "https://b.example/v1beta/models/test:generateContent")
+	}
+	if auth != "Bearer key-b" {
+		t.Fatalf("Authorization=%q want=%q", auth, "Bearer key-b")
+	}
+	if apiKey != "key-b" {
+		t.Fatalf("x-goog-api-key=%q want=%q", apiKey, "key-b")
+	}
+}
+
+func TestHandler_LogsActualStatusCode(t *testing.T) {
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+	}()
+
+	app := &App{}
+	req := httptest.NewRequest(http.MethodGet, "http://localhost/not-found", nil)
+	rr := httptest.NewRecorder()
+
+	app.Handler(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d want=%d", rr.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(buf.String(), "GET /not-found 404 ") {
+		t.Fatalf("expected log to contain actual status code, got=%q", buf.String())
 	}
 }
 

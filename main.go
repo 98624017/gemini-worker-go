@@ -160,6 +160,48 @@ type uploadResult struct {
 	Provider string
 }
 
+type upstreamOverrideConfig struct {
+	BaseURL string
+	APIKey  string
+}
+
+type upstreamOverrideRoute struct {
+	Primary   upstreamOverrideConfig
+	Secondary *upstreamOverrideConfig
+}
+
+type statusCapturingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *statusCapturingResponseWriter) WriteHeader(code int) {
+	if w.statusCode == 0 {
+		w.statusCode = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusCapturingResponseWriter) Write(p []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.statusCode = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusCapturingResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *statusCapturingResponseWriter) StatusCode() int {
+	if w == nil || w.statusCode == 0 {
+		return http.StatusOK
+	}
+	return w.statusCode
+}
+
 func newBaseTransport() *http.Transport {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
@@ -510,6 +552,99 @@ func parseBoolEnvWith(getenv func(string) string, key string, defaultValue bool)
 	}
 }
 
+func parseSingleUpstreamOverride(raw string) (upstreamOverrideConfig, error) {
+	parts := strings.SplitN(strings.TrimSpace(raw), "|", 2)
+	if len(parts) != 2 {
+		return upstreamOverrideConfig{}, errors.New("upstream override must use <baseUrl>|<apiKey>")
+	}
+	baseURL := strings.TrimSpace(parts[0])
+	apiKey := strings.TrimSpace(parts[1])
+	if _, err := parseHTTPBaseURL(baseURL, "upstream override baseUrl"); err != nil {
+		return upstreamOverrideConfig{}, err
+	}
+	if apiKey == "" {
+		return upstreamOverrideConfig{}, errors.New("upstream override apiKey is empty")
+	}
+	return upstreamOverrideConfig{BaseURL: baseURL, APIKey: apiKey}, nil
+}
+
+func parseUpstreamOverrideToken(token string) (*upstreamOverrideRoute, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, nil
+	}
+	if strings.Contains(token, ",") {
+		rawParts := strings.Split(token, ",")
+		if len(rawParts) != 2 {
+			return nil, errors.New("dual upstream token must contain exactly two <baseUrl>|<apiKey> entries")
+		}
+		primary, err := parseSingleUpstreamOverride(rawParts[0])
+		if err != nil {
+			return nil, err
+		}
+		secondary, err := parseSingleUpstreamOverride(rawParts[1])
+		if err != nil {
+			return nil, err
+		}
+		return &upstreamOverrideRoute{
+			Primary:   primary,
+			Secondary: &secondary,
+		}, nil
+	}
+	if strings.Contains(token, "|") {
+		cfg, err := parseSingleUpstreamOverride(token)
+		if err != nil {
+			return nil, err
+		}
+		return &upstreamOverrideRoute{Primary: cfg}, nil
+	}
+	return &upstreamOverrideRoute{
+		Primary: upstreamOverrideConfig{APIKey: token},
+	}, nil
+}
+
+func getRequestedImageSize(body map[string]interface{}) string {
+	if genConfig, ok := body["generationConfig"].(map[string]interface{}); ok {
+		if imgConfig, ok := genConfig["imageConfig"].(map[string]interface{}); ok {
+			if v, ok := imgConfig["imageSize"].(string); ok {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	if genConfig, ok := body["generation_config"].(map[string]interface{}); ok {
+		if imgConfig, ok := genConfig["image_config"].(map[string]interface{}); ok {
+			if v, ok := imgConfig["image_size"].(string); ok {
+				return strings.TrimSpace(v)
+			}
+			if v, ok := imgConfig["imageSize"].(string); ok {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	return ""
+}
+
+func resolveUpstreamOverride(defaultBase, defaultKey string, route *upstreamOverrideRoute, body map[string]interface{}) (string, string) {
+	if route == nil {
+		return defaultBase, defaultKey
+	}
+
+	selected := route.Primary
+	if route.Secondary != nil && strings.EqualFold(getRequestedImageSize(body), "4k") {
+		selected = *route.Secondary
+	}
+
+	base := defaultBase
+	key := defaultKey
+	if strings.TrimSpace(selected.BaseURL) != "" {
+		base = selected.BaseURL
+	}
+	if strings.TrimSpace(selected.APIKey) != "" {
+		key = selected.APIKey
+	}
+	return base, key
+}
+
 func main() {
 	containerLimitBytes := detectContainerMemoryLimitBytes()
 	runtimeTuning := configureRuntimeMemory(os.Getenv, containerLimitBytes, debug.SetGCPercent, debug.SetMemoryLimit)
@@ -673,30 +808,31 @@ func main() {
 func (app *App) Handler(w http.ResponseWriter, r *http.Request) {
 	// Simple Logging
 	start := time.Now()
+	sw := &statusCapturingResponseWriter{ResponseWriter: w}
 	defer func() {
-		log.Printf("%s %s %d %v", r.Method, r.URL.Path, 200, time.Since(start)) // Status code logic simplified for log
+		log.Printf("%s %s %d %v", r.Method, r.URL.Path, sw.StatusCode(), time.Since(start))
 	}()
 
 	path := r.URL.Path
 	if strings.HasPrefix(path, "/admin") {
-		app.handleAdmin(w, r)
+		app.handleAdmin(sw, r)
 		return
 	}
 	if path == "/proxy/image" && r.Method == "GET" {
-		app.handleProxyImage(w, r)
+		app.handleProxyImage(sw, r)
 		return
 	}
 
 	if strings.HasPrefix(path, "/v1beta/models/") && strings.HasSuffix(path, ":generateContent") {
-		app.handleGeminiRequest(w, r, false)
+		app.handleGeminiRequest(sw, r, false)
 		return
 	}
 	if strings.HasPrefix(path, "/v1beta/models/") && strings.HasSuffix(path, ":streamGenerateContent") {
-		app.handleGeminiRequest(w, r, true)
+		app.handleGeminiRequest(sw, r, true)
 		return
 	}
 
-	http.Error(w, "Not Found", http.StatusNotFound)
+	http.Error(sw, "Not Found", http.StatusNotFound)
 }
 
 // --- Proxy Logic ---
@@ -810,21 +946,14 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 		token = strings.TrimPrefix(authHeader, "Bearer ")
 	}
 
-	if token != "" {
-		// Check for "baseUrl|apiKey" format
-		if idx := strings.Index(token, "|"); idx != -1 {
-			customBase := strings.TrimSpace(token[:idx])
-			realKey := strings.TrimSpace(token[idx+1:])
-
-			if customBase != "" {
-				upstreamBase = customBase
-			}
-			if realKey != "" {
-				upstreamKey = realKey
-			}
-		} else {
-			upstreamKey = token
+	overrideRoute, err := parseUpstreamOverrideToken(token)
+	if err != nil {
+		body := geminiError(w, 400, "Invalid upstream apiKey override")
+		if adminEntry != nil {
+			adminEntry.StatusCode = 400
+			adminEntry.ResponseDownstream, adminEntry.ResponseImages = sanitizeJSONForAdminLog(body)
 		}
+		return
 	}
 
 	if upstreamKey == "" {
@@ -864,6 +993,8 @@ func (app *App) handleGeminiRequest(w http.ResponseWriter, r *http.Request, isSt
 		}
 		return
 	}
+
+	upstreamBase, upstreamKey = resolveUpstreamOverride(upstreamBase, upstreamKey, overrideRoute, bodyMap)
 
 	// 3. Output Preference
 	queryOutput := r.URL.Query().Get("output")
