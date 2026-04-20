@@ -267,6 +267,222 @@ async fn upstream_json_error_preserves_message_and_adds_proxy_metadata() {
     assert_eq!(json_body["error"]["kind"], "upstream_error");
 }
 
+#[tokio::test]
+async fn dual_upstream_header_routes_4k_requests_to_second_standard_upstream() {
+    let first_state = TestState::default();
+    let first_server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content),
+        )
+        .with_state(first_state.clone());
+    let first_addr = spawn_server(first_server).await;
+
+    let second_state = TestState::default();
+    let second_server = Router::new()
+        .route(
+            "/v1beta/models/demo:generateContent",
+            post(mock_generate_content),
+        )
+        .with_state(second_state.clone());
+    let second_addr = spawn_server(second_server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{first_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    let app = rust_sync_proxy::build_router(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .header(
+                    "x-goog-api-key",
+                    format!("http://{first_addr}|first-key,http://{second_addr}|second-key"),
+                )
+                .body(Body::from(
+                    json!({
+                        "generationConfig": {
+                            "imageConfig": {
+                                "imageSize": "4k"
+                            }
+                        },
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let first_requests = first_state.upstream_requests.lock().await.clone();
+    let second_requests = second_state.upstream_requests.lock().await.clone();
+    assert!(first_requests.is_empty());
+    assert_eq!(second_requests.len(), 1);
+    assert_eq!(second_requests[0].api_key, "second-key");
+    assert_eq!(second_requests[0].authorization, "Bearer second-key");
+}
+
+#[tokio::test]
+async fn malformed_dual_upstream_header_returns_bad_request() {
+    let app = rust_sync_proxy::build_router(rust_sync_proxy::test_config());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .header(
+                    "x-goog-api-key",
+                    "https://first.example|first-key,second-key-only",
+                )
+                .body(Body::from(
+                    json!({
+                        "generationConfig": {
+                            "imageConfig": {
+                                "imageSize": "4k"
+                            }
+                        },
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json_body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dual upstream")
+    );
+}
+
+#[tokio::test]
+async fn image_generations_forwards_reference_images_and_returns_uploaded_urls() {
+    let state = TestState::default();
+    let server = Router::new()
+        .route("/v1/images/generations", post(mock_openai_image_generation))
+        .route("/uguu", post(mock_legacy_upload))
+        .with_state(state.clone());
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    config.legacy_uguu_upload_url = format!("http://{server_addr}/uguu");
+    let app = rust_sync_proxy::build_router(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .header(
+                    AUTHORIZATION,
+                    format!("Bearer http://{server_addr}|real-upstream-key"),
+                )
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-image-2",
+                        "prompt": "draw cat",
+                        "image": ["https://img.example/a.png"],
+                        "response_format": "url"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["created"], 1_776_663_103);
+    assert_eq!(json_body["data"][0]["url"], "https://img.example.com/forwarded.png");
+    assert_eq!(json_body["usage"]["total_tokens"], 2048);
+
+    let upstream_requests = state.upstream_requests.lock().await.clone();
+    assert_eq!(upstream_requests.len(), 1);
+    let upstream_json: Value = serde_json::from_slice(&upstream_requests[0].body).unwrap();
+    assert_eq!(
+        upstream_json["reference_images"],
+        json!(["https://img.example/a.png"])
+    );
+    assert_eq!(upstream_json["response_format"], "b64_json");
+    assert!(upstream_json.get("image").is_none());
+    assert!(upstream_json.get("images").is_none());
+    assert_eq!(upstream_requests[0].api_key, "");
+    assert_eq!(upstream_requests[0].authorization, "Bearer real-upstream-key");
+
+    assert_eq!(*state.upload_count.lock().await, 1);
+}
+
+#[tokio::test]
+async fn image_generations_returns_bad_gateway_when_upstream_data_is_empty() {
+    let state = TestState::default();
+    let server = Router::new()
+        .route(
+            "/v1/images/generations",
+            post(mock_openai_image_generation_empty_data),
+        )
+        .route("/uguu", post(mock_legacy_upload))
+        .with_state(state.clone());
+    let server_addr = spawn_server(server).await;
+
+    let mut config = rust_sync_proxy::test_config();
+    config.upstream_base_url = format!("http://{server_addr}");
+    config.upstream_api_key = "env-key".to_string();
+    config.legacy_uguu_upload_url = format!("http://{server_addr}/uguu");
+    let app = rust_sync_proxy::build_router(config);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "gpt-image-2",
+                        "prompt": "draw cat",
+                        "images": ["https://img.example/a.png"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json_body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json_body["error"]["message"], "upstream response missing data");
+    assert_eq!(*state.upload_count.lock().await, 0);
+}
+
 async fn mock_generate_content(
     State(state): State<TestState>,
     headers: HeaderMap,
@@ -306,6 +522,54 @@ async fn mock_generate_content(
                 ]
             }
         }]
+    }))
+}
+
+async fn mock_openai_image_generation(
+    State(state): State<TestState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Json<Value> {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    state
+        .upstream_requests
+        .lock()
+        .await
+        .push(CapturedUpstreamRequest {
+            body: body.to_vec(),
+            query: uri.query().unwrap_or_default().to_string(),
+            api_key: headers
+                .get("x-goog-api-key")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+            authorization,
+        });
+
+    Json(json!({
+        "created": 1_776_663_103,
+        "data": [{
+            "b64_json": "iVBORw0KGgo="
+        }]
+    }))
+}
+
+async fn mock_openai_image_generation_empty_data(
+    State(state): State<TestState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Json<Value> {
+    let _ = mock_openai_image_generation(State(state), headers, uri, body).await;
+    Json(json!({
+        "created": 1_776_663_103,
+        "data": []
     }))
 }
 

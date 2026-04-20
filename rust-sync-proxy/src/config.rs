@@ -54,6 +54,7 @@ pub struct Config {
     pub proxy_standard_output_urls: bool,
     pub proxy_special_upstream_urls: bool,
     pub enable_image_compression: bool,
+    pub enable_request_image_webp_optimization: bool,
     pub image_compression_jpeg_quality: u8,
     pub admin_password: String,
     pub image_fetch_timeout: Duration,
@@ -144,12 +145,10 @@ impl Config {
                 env_map.get("UPSTREAM_TCP_KEEPALIVE_MS"),
                 DEFAULT_UPSTREAM_TCP_KEEPALIVE_MS,
             )),
-            upstream_pool_idle_timeout: Duration::from_millis(
-                parse_positive_u64_with_default(
-                    env_map.get("UPSTREAM_POOL_IDLE_TIMEOUT_MS"),
-                    DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_MS,
-                ),
-            ),
+            upstream_pool_idle_timeout: Duration::from_millis(parse_positive_u64_with_default(
+                env_map.get("UPSTREAM_POOL_IDLE_TIMEOUT_MS"),
+                DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_MS,
+            )),
             image_host_mode,
             allowed_proxy_domains,
             public_base_url: env_map
@@ -172,6 +171,10 @@ impl Config {
                 true,
             ),
             enable_image_compression: parse_bool(env_map.get("ENABLE_IMAGE_COMPRESSION"), false),
+            enable_request_image_webp_optimization: parse_bool(
+                env_map.get("ENABLE_REQUEST_IMAGE_WEBP_OPTIMIZATION"),
+                false,
+            ),
             image_compression_jpeg_quality: parse_jpeg_quality(
                 env_map.get("IMAGE_COMPRESSION_JPEG_QUALITY"),
                 DEFAULT_IMAGE_COMPRESSION_JPEG_QUALITY,

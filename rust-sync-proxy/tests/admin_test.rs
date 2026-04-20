@@ -129,6 +129,80 @@ async fn admin_stats_include_spill_metrics() {
 }
 
 #[tokio::test]
+async fn admin_logs_and_stats_include_stage_duration_fields() {
+    let mut config = rust_sync_proxy::test_config();
+    config.admin_password = "pw".to_string();
+
+    let app = rust_sync_proxy::build_router(config);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"contents":[{"parts":[{"text":"hello"}]}]"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let auth = format!("Basic {}", STANDARD.encode("user:pw"));
+    let logs_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/api/logs")
+                .header("authorization", auth.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(logs_response.status(), StatusCode::OK);
+    let logs_body = to_bytes(logs_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let logs_json: serde_json::Value = serde_json::from_slice(&logs_body).unwrap();
+    let first = &logs_json["items"][0];
+    assert!(first["requestParseMs"].is_number());
+    assert!(first["requestImagePrepareMs"].is_number());
+    assert!(first["requestImageMaterializeMs"].is_number());
+    assert!(first["requestImageFetchWorkMs"].is_number());
+    assert!(first["requestImageStoreWorkMs"].is_number());
+    assert!(first["requestEncodeMs"].is_number());
+    assert!(first["upstreamBuildMs"].is_number());
+    assert!(first["responseProcessMs"].is_number());
+    assert!(first["uploadMs"].is_number());
+
+    let stats_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/api/stats")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stats_response.status(), StatusCode::OK);
+    let stats_body = to_bytes(stats_response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let stats_json: serde_json::Value = serde_json::from_slice(&stats_body).unwrap();
+    assert!(stats_json["requestParseMs"].is_number());
+    assert!(stats_json["requestImagePrepareMs"].is_number());
+    assert!(stats_json["requestImageMaterializeMs"].is_number());
+    assert!(stats_json["requestImageFetchWorkMs"].is_number());
+    assert!(stats_json["requestImageStoreWorkMs"].is_number());
+    assert!(stats_json["requestEncodeMs"].is_number());
+    assert!(stats_json["upstreamBuildMs"].is_number());
+    assert!(stats_json["responseProcessMs"].is_number());
+    assert!(stats_json["uploadMs"].is_number());
+}
+
+#[tokio::test]
 async fn admin_logs_capture_structured_proxy_error_fields() {
     let mut config = rust_sync_proxy::test_config();
     config.admin_password = "pw".to_string();
@@ -333,15 +407,27 @@ async fn admin_logs_page_contains_chartjs_and_theme_toggle() {
 }
 
 #[tokio::test]
-async fn admin_logs_page_only_previews_proxy_images() {
+async fn admin_logs_page_album_previews_safe_images_by_default() {
     let html = fetch_admin_logs_page_html().await;
     assert!(
         html.contains("startsWith('/proxy/image')"),
-        "HTML should only auto-preview proxy image URLs"
+        "list/detail preview guard should still exist for proxy image URLs"
     );
     assert!(
-        html.contains("external image"),
-        "HTML should keep external image URLs inert until explicit open"
+        html.contains("function canPreviewAlbumImageUrl(u)"),
+        "HTML should expose album-safe-image preview helper"
+    );
+    assert!(
+        html.contains("return !!safeUrl(u);"),
+        "album preview helper should allow safe URLs by default"
+    );
+    assert!(
+        html.contains("var canPreviewAlbumThumb = canPreviewAlbumImageUrl(safe);"),
+        "album request-image preview should use safe-url helper instead of proxy-only guard"
+    );
+    assert!(
+        html.contains("var canPreviewResult = canPreviewAlbumImageUrl(safeResultUrl);"),
+        "album result-image preview should use safe-url helper instead of proxy-only guard"
     );
 }
 
@@ -385,6 +471,202 @@ async fn admin_logs_page_contains_error_detail_section() {
     assert!(
         html.contains("upstream status"),
         "HTML should contain upstream status label"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_contains_chart_collapse_and_view_switch() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("<section class=\"charts-section collapsed\" id=\"chartsSection\">"),
+        "HTML should default charts section to collapsed"
+    );
+    assert!(
+        html.contains("id=\"chartsToggle\" type=\"button\" aria-expanded=\"false\""),
+        "HTML should default charts toggle aria-expanded to false"
+    );
+    assert!(
+        html.contains("id=\"chartsPanel\" aria-hidden=\"true\""),
+        "HTML should mark charts panel hidden by default"
+    );
+    assert!(
+        html.contains("id=\"viewModeTabs\" role=\"group\" aria-label=\"content view mode\""),
+        "HTML should expose view mode as button group semantics"
+    );
+    assert!(
+        html.contains(
+            "class=\"view-mode-tab active\" data-view=\"list\" aria-pressed=\"true\">列表视图</button>"
+        ),
+        "HTML should default list view as active"
+    );
+    assert!(
+        html.contains(
+            "class=\"view-mode-tab\" data-view=\"album\" aria-pressed=\"false\">相册视图</button>"
+        ),
+        "HTML should contain album view switch button"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_persists_view_mode_and_chart_collapse_state() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("admin:viewMode"),
+        "HTML should persist selected admin view mode"
+    );
+    assert!(
+        html.contains("admin:chartsCollapsed"),
+        "HTML should persist chart collapse state"
+    );
+    assert!(
+        html.contains("function setChartsCollapsed("),
+        "HTML should expose chart collapse state setter"
+    );
+    assert!(
+        html.contains("function setViewMode("),
+        "HTML should expose view mode state setter"
+    );
+    assert!(
+        html.contains("function isInteractiveControlTarget("),
+        "HTML should guard global shortcuts for focused interactive controls"
+    );
+    assert!(
+        html.contains("button, a, input, select, textarea"),
+        "HTML should include interactive selector list for keyboard shortcut guard"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_uses_shared_filtered_items_for_all_views() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("function getFilteredItems()"),
+        "HTML should compute filtered items once for all views"
+    );
+    assert!(
+        html.contains("function renderMainContent(items)"),
+        "HTML should render current content from a shared pipeline"
+    );
+    assert!(
+        html.contains("albumList"),
+        "HTML should contain dedicated album container"
+    );
+    assert!(
+        html.contains("if (viewMode !== 'list') return [];"),
+        "HTML keyboard navigation should ignore hidden list items in album view"
+    );
+    assert!(
+        html.contains("no requests yet"),
+        "HTML should keep first-load empty copy for zero total requests"
+    );
+    assert!(
+        html.contains("no matching requests"),
+        "HTML should keep filtered-empty copy for non-empty datasets"
+    );
+    assert!(
+        html.contains("allItems.length === 0"),
+        "HTML should distinguish true empty dataset from filtered-empty results"
+    );
+    assert!(
+        html.contains("var albumEmptyCopy = allItems.length === 0 ? 'no requests yet' : 'no matching requests';"),
+        "HTML should keep album empty copy consistent with list empty-state distinction"
+    );
+    assert!(
+        html.contains("var listOnlyKey = e.key === 'j' || e.key === 'k' || e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ';"),
+        "HTML should classify list-only shortcuts explicitly"
+    );
+    assert!(
+        html.contains("if (listOnlyKey && viewMode !== 'list') return;"),
+        "HTML should skip preventDefault for list-only shortcuts in album view"
+    );
+    assert!(
+        html.contains("function snapshotListContext()"),
+        "HTML should snapshot list context before list rerender"
+    );
+    assert!(
+        html.contains("function restoreListContext(snapshot, items)"),
+        "HTML should restore list context after list rerender"
+    );
+    assert!(
+        html.contains("var listContext = snapshotListContext();"),
+        "HTML should capture list context before shared content rerender"
+    );
+    assert!(
+        html.contains("if (listContext && (listContext.expandedIds.length || listContext.renderedIds.length || listContext.focusedId)) preservedListContext = listContext;"),
+        "HTML should only overwrite preserved list context when snapshot has meaningful state"
+    );
+    assert!(
+        html.contains("if (!snapshot.expandedIds.length && !snapshot.renderedIds.length && !snapshot.focusedId) return null;"),
+        "HTML should return null for empty list snapshots to avoid wiping preserved context"
+    );
+    assert!(
+        html.contains("restoreListContext(listContext, filtered);"),
+        "HTML should restore list context after shared content rerender"
+    );
+    assert!(
+        html.contains("el.dataset.itemId = String(item.id);"),
+        "HTML should mark list rows with stable item IDs for context restore"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_contains_album_rendering_helpers() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("function extractPromptText(item)"),
+        "HTML should extract prompt text for album cards"
+    );
+    assert!(
+        html.contains("function renderAlbum(items)"),
+        "HTML should render album cards"
+    );
+    assert!(html.contains("album-card"), "HTML should style album cards");
+    assert!(
+        html.contains("查看对应记录"),
+        "HTML should expose jump back action from album"
+    );
+    assert!(
+        html.contains("catch (_) { return truncateText(raw, 280); }"),
+        "HTML should only fallback to raw truncation when prompt JSON parse fails"
+    );
+    assert!(
+        html.contains("if (lines.length) return lines.join('\\n');"),
+        "HTML should return extracted prompt text when text parts exist"
+    );
+    assert!(
+        html.contains("if (parsed && typeof parsed === 'object') return '';"),
+        "HTML should return empty prompt when request JSON parses but has no text parts"
+    );
+}
+
+#[tokio::test]
+async fn admin_logs_page_contains_album_jump_back_logic() {
+    let html = fetch_admin_logs_page_html().await;
+    assert!(
+        html.contains("function jumpToListItem(itemId)"),
+        "HTML should expose jump-back helper from album to list"
+    );
+    assert!(
+        html.contains("data-item-id"),
+        "HTML should stamp stable item ids on rendered elements"
+    );
+    assert!(
+        html.contains("pendingScrollTargetId"),
+        "HTML should keep pending list jump state"
+    );
+    assert!(
+        html.contains(".log-detail,"),
+        "HTML should disable log-detail motion in reduced-motion mode"
+    );
+    assert!(
+        html.contains("var scrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';"),
+        "HTML should avoid forced smooth scrolling when reduced-motion is preferred"
+    );
+    assert!(
+        html.contains(
+            "if (viewMode === 'list') {\n      restoreListContext(listContext, filtered);\n      flushPendingScrollTarget();\n    }"
+        ),
+        "HTML should restore list context before flushing pending jump target"
     );
 }
 

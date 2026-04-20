@@ -1,10 +1,11 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{error::Error as StdError, fmt};
 
 use anyhow::{Result, anyhow};
 use axum::body::{Body, to_bytes};
 use axum::extract::{Path, Request, State};
+use base64::Engine;
 use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -14,7 +15,7 @@ use serde_json::{Value, json};
 use tokio_util::io::ReaderStream;
 use url::{Url, form_urlencoded};
 
-use crate::admin::{self, AdminLogEntry, AdminState};
+use crate::admin::{self, AdminLogEntry, AdminState, SanitizedAdminLog};
 use crate::blob_runtime::{BlobRuntime, BlobRuntimeConfig};
 use crate::cache::InlineDataUrlFetchService;
 use crate::config::Config;
@@ -28,9 +29,9 @@ use crate::response_rewrite::{
     OutputMode, keep_largest_inline_image, normalize_aiapidev_task_response,
     normalize_special_markdown_image_response, remove_thought_signatures,
 };
-use crate::upload::Uploader;
+use crate::upload::{Uploader, wrap_external_proxy_url};
 use crate::upstream::{
-    ResolvedUpstream, is_aiapidev_base_url, resolve_upstream_from_header_map,
+    ResolvedUpstream, is_aiapidev_base_url, resolve_upstream_for_request_from_header_map,
     rewrite_aiapidev_model_path,
 };
 
@@ -161,6 +162,85 @@ fn build_structured_proxy_error_response(structured: &StructuredProxyError) -> R
     )
 }
 
+struct RequestCacheTracking {
+    observer: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
+    hit_urls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RequestLogSnapshot {
+    request_raw: Option<SanitizedAdminLog>,
+}
+
+impl RequestLogSnapshot {
+    fn from_request_body(raw: &[u8], enabled: bool) -> Self {
+        Self {
+            request_raw: sanitize_request_body_for_log(raw, enabled),
+        }
+    }
+
+    fn apply_to_entry(&self, entry: &mut AdminLogEntry) {
+        if let Some(value) = &self.request_raw {
+            entry.request_raw = value.pretty.clone();
+            entry.request_raw_images = value.image_urls.clone();
+        }
+    }
+
+    fn base_entry(&self) -> AdminLogEntry {
+        let mut entry = AdminLogEntry::default();
+        self.apply_to_entry(&mut entry);
+        entry
+    }
+}
+
+#[cfg(test)]
+static REQUEST_LOG_SANITIZE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn sanitize_request_body_for_log(raw: &[u8], enabled: bool) -> Option<SanitizedAdminLog> {
+    #[cfg(test)]
+    REQUEST_LOG_SANITIZE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    admin::maybe_sanitize_json_for_log(raw, enabled)
+}
+
+#[derive(Debug)]
+struct ForwardRequestFailure {
+    error: anyhow::Error,
+    admin_entry: AdminLogEntry,
+}
+
+impl ForwardRequestFailure {
+    fn new(error: impl Into<anyhow::Error>, admin_entry: AdminLogEntry) -> Self {
+        Self {
+            error: error.into(),
+            admin_entry,
+        }
+    }
+}
+
+fn build_request_cache_tracking(
+    admin_stats: Option<Arc<crate::admin::AdminStats>>,
+) -> RequestCacheTracking {
+    let hit_urls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observer = admin_stats.map(|stats| {
+        let hit_urls = Arc::clone(&hit_urls);
+        Arc::new(move |raw_url: &str, from_cache: bool| {
+            if from_cache {
+                stats
+                    .cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                hit_urls.lock().unwrap().push(raw_url.to_string());
+            }
+        }) as Arc<dyn Fn(&str, bool) + Send + Sync>
+    });
+
+    RequestCacheTracking { observer, hit_urls }
+}
+
+fn update_request_cache_hits(entry: &mut AdminLogEntry, tracking: &RequestCacheTracking) {
+    entry.request_raw_image_cache_hits = tracking.hit_urls.lock().unwrap().clone();
+}
+
 fn build_upstream_client(config: &Config) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(config.upstream_timeout)
@@ -240,6 +320,12 @@ struct AppState {
     blob_runtime: Arc<BlobRuntime>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ResponseStageDurations {
+    response_process_ms: i64,
+    upload_ms: i64,
+}
+
 pub fn build_router(config: Config) -> Router {
     let admin = if config.admin_password.trim().is_empty() {
         None
@@ -262,7 +348,7 @@ pub fn build_router(config: Config) -> Router {
         crate::image_io::REQUEST_MAX_IMAGE_BYTES,
         false,
     );
-    let response_inline_data_fetch_service = InlineDataUrlFetchService::from_config(
+    let response_inline_data_fetch_service = InlineDataUrlFetchService::from_response_config(
         &config,
         image_client.clone(),
         crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
@@ -292,8 +378,217 @@ pub fn build_router(config: Config) -> Router {
         .route("/admin/logs", get(admin_logs_page))
         .route("/admin/api/logs", get(admin_logs_api))
         .route("/admin/api/stats", get(admin_stats_api))
+        .route("/v1/images/generations", post(image_generations_action))
         .route("/v1beta/models/{*rest}", post(model_action))
         .with_state(state)
+}
+
+async fn image_generations_action(State(state): State<AppState>, request: Request) -> Response {
+    let started_at = Instant::now();
+    let created_at = admin::now_rfc3339();
+    let request_method = request.method().to_string();
+    let request_path = request.uri().path().to_string();
+    let request_query = request.uri().query().unwrap_or_default().to_string();
+    let remote_addr = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    let request_parse_started = Instant::now();
+    let (parts, body) = request.into_parts();
+    let request_body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(err) => {
+            let response = (
+                StatusCode::BAD_GATEWAY,
+                Json(proxy_error_json(
+                    502,
+                    "failed to read request body",
+                    "proxy",
+                    "read_request_body",
+                    "request_body_read_failed",
+                )),
+            )
+                .into_response();
+            return finalize_admin_response(
+                &state,
+                response,
+                AdminLogEntry {
+                    created_at,
+                    method: request_method,
+                    path: request_path,
+                    query: request_query,
+                    remote_addr,
+                    is_stream: false,
+                    status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                    duration_ms: started_at.elapsed().as_millis() as i64,
+                    request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                    error_source: "proxy".to_string(),
+                    error_stage: "read_request_body".to_string(),
+                    error_kind: "request_body_read_failed".to_string(),
+                    error_message: "failed to read request body".to_string(),
+                    error_detail: err.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        }
+    };
+    let request_log = RequestLogSnapshot::from_request_body(&request_body, state.admin.is_some());
+
+    let parsed_body: Value = match serde_json::from_slice(&request_body) {
+        Ok(body) => body,
+        Err(err) => {
+            let mut admin_entry = AdminLogEntry {
+                created_at,
+                method: request_method,
+                path: request_path,
+                query: request_query,
+                remote_addr,
+                is_stream: false,
+                status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                duration_ms: started_at.elapsed().as_millis() as i64,
+                request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                error_source: "proxy".to_string(),
+                error_stage: "parse_request_json".to_string(),
+                error_kind: "invalid_json".to_string(),
+                error_message: "invalid request json body".to_string(),
+                error_detail: format!("invalid request json body: {err}"),
+                ..Default::default()
+            };
+            request_log.apply_to_entry(&mut admin_entry);
+            let response = (
+                StatusCode::BAD_GATEWAY,
+                Json(proxy_error_json(
+                    502,
+                    "invalid request json body",
+                    "proxy",
+                    "parse_request_json",
+                    "invalid_json",
+                )),
+            )
+                .into_response();
+            return finalize_admin_response(&state, response, admin_entry).await;
+        }
+    };
+
+    let normalized_body = match crate::openai_image::normalize_request_body(parsed_body) {
+        Ok(body) => body,
+        Err(err) => {
+            let mut admin_entry = AdminLogEntry {
+                created_at,
+                method: request_method,
+                path: request_path,
+                query: request_query,
+                remote_addr,
+                is_stream: false,
+                status_code: StatusCode::BAD_REQUEST.as_u16(),
+                duration_ms: started_at.elapsed().as_millis() as i64,
+                request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                error_source: "proxy".to_string(),
+                error_stage: "normalize_openai_image_request".to_string(),
+                error_kind: "invalid_request".to_string(),
+                error_message: "invalid openai image request".to_string(),
+                error_detail: err.to_string(),
+                ..Default::default()
+            };
+            request_log.apply_to_entry(&mut admin_entry);
+            let response = (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"code": 400, "message": err.to_string()}})),
+            )
+                .into_response();
+            return finalize_admin_response(&state, response, admin_entry).await;
+        }
+    };
+
+    let resolved = match resolve_upstream_for_request_from_header_map(
+        &parts.headers,
+        &normalized_body,
+        &state.config.upstream_base_url,
+        &state.config.upstream_api_key,
+    ) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            let status = err.status_code();
+            let mut admin_entry = AdminLogEntry {
+                created_at,
+                method: request_method,
+                path: request_path,
+                query: request_query,
+                remote_addr,
+                is_stream: false,
+                status_code: status.as_u16(),
+                duration_ms: started_at.elapsed().as_millis() as i64,
+                request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                ..Default::default()
+            };
+            request_log.apply_to_entry(&mut admin_entry);
+            let response = (
+                status,
+                Json(json!({"error": {"code": status.as_u16(), "message": err.to_string()}})),
+            )
+                .into_response();
+            return finalize_admin_response(&state, response, admin_entry).await;
+        }
+    };
+    let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+
+    match forward_openai_image_request(
+        state.clone(),
+        resolved,
+        normalized_body,
+        if request_query.is_empty() {
+            None
+        } else {
+            Some(request_query.clone())
+        },
+        request_log.clone(),
+    )
+    .await
+    {
+        Ok((response, mut admin_entry)) => {
+            admin_entry.created_at = created_at;
+            admin_entry.method = request_method;
+            admin_entry.path = request_path;
+            admin_entry.query = request_query;
+            admin_entry.remote_addr = remote_addr;
+            admin_entry.is_stream = false;
+            admin_entry.request_parse_ms += request_parse_ms;
+            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
+            finalize_admin_response(&state, response, admin_entry).await
+        }
+        Err(failure) => {
+            let mut admin_entry = failure.admin_entry;
+            admin_entry.created_at = created_at;
+            admin_entry.method = request_method;
+            admin_entry.path = request_path;
+            admin_entry.query = request_query;
+            admin_entry.remote_addr = remote_addr;
+            admin_entry.is_stream = false;
+            admin_entry.status_code = StatusCode::BAD_GATEWAY.as_u16();
+            admin_entry.request_parse_ms += request_parse_ms;
+            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
+            let response =
+                if let Some(structured) = classify_standard_proxy_error_detail(&failure.error) {
+                    apply_structured_proxy_error(&mut admin_entry, &structured);
+                    build_structured_proxy_error_response(&structured)
+                } else if let Some(structured_error) =
+                    classify_standard_proxy_error(&failure.error)
+                {
+                    (StatusCode::BAD_GATEWAY, Json(structured_error)).into_response()
+                } else {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"error": {"code": 502, "message": failure.error.to_string()}})),
+                    )
+                        .into_response()
+                };
+            finalize_admin_response(&state, response, admin_entry).await
+        }
+    }
 }
 
 async fn model_action(
@@ -312,37 +607,6 @@ async fn model_action(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-
-    let resolved = match resolve_upstream_from_header_map(
-        request.headers(),
-        &state.config.upstream_base_url,
-        &state.config.upstream_api_key,
-    ) {
-        Ok(resolved) => resolved,
-        Err(err) => {
-            let response = (
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error": {"code": 401, "message": err.to_string()}})),
-            )
-                .into_response();
-            return finalize_admin_response(
-                &state,
-                response,
-                AdminLogEntry {
-                    created_at,
-                    method: request_method,
-                    path: request_path,
-                    query: request_query,
-                    remote_addr,
-                    is_stream: false,
-                    status_code: StatusCode::UNAUTHORIZED.as_u16(),
-                    duration_ms: started_at.elapsed().as_millis() as i64,
-                    ..Default::default()
-                },
-            )
-            .await;
-        }
-    };
 
     if !rest.ends_with(":generateContent") {
         let response = (
@@ -367,20 +631,51 @@ async fn model_action(
         )
         .await;
     }
-    let target_path = format!("/v1beta/models/{rest}");
-    let is_aiapidev_upstream = is_aiapidev_base_url(&resolved.base_url);
 
-    match forward_gemini_request(state.clone(), resolved, target_path, request).await {
-        Ok((response, mut admin_entry)) => {
-            admin_entry.created_at = created_at;
-            admin_entry.method = request_method;
-            admin_entry.path = request_path;
-            admin_entry.query = request_query;
-            admin_entry.remote_addr = remote_addr;
-            admin_entry.is_stream = false;
-            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
-            finalize_admin_response(&state, response, admin_entry).await
+    let request_parse_started = Instant::now();
+    let (parts, body) = request.into_parts();
+    let request_body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(err) => {
+            let response = (
+                StatusCode::BAD_GATEWAY,
+                Json(proxy_error_json(
+                    502,
+                    "failed to read request body",
+                    "proxy",
+                    "read_request_body",
+                    "request_body_read_failed",
+                )),
+            )
+                .into_response();
+            return finalize_admin_response(
+                &state,
+                response,
+                AdminLogEntry {
+                    created_at,
+                    method: request_method,
+                    path: request_path,
+                    query: request_query,
+                    remote_addr,
+                    is_stream: false,
+                    status_code: StatusCode::BAD_GATEWAY.as_u16(),
+                    duration_ms: started_at.elapsed().as_millis() as i64,
+                    request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                    error_source: "proxy".to_string(),
+                    error_stage: "read_request_body".to_string(),
+                    error_kind: "request_body_read_failed".to_string(),
+                    error_message: "failed to read request body".to_string(),
+                    error_detail: err.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await;
         }
+    };
+    let request_log = RequestLogSnapshot::from_request_body(&request_body, state.admin.is_some());
+
+    let parsed_body: Value = match serde_json::from_slice(&request_body) {
+        Ok(body) => body,
         Err(err) => {
             let mut admin_entry = AdminLogEntry {
                 created_at,
@@ -391,25 +686,115 @@ async fn model_action(
                 is_stream: false,
                 status_code: StatusCode::BAD_GATEWAY.as_u16(),
                 duration_ms: started_at.elapsed().as_millis() as i64,
+                request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                error_source: "proxy".to_string(),
+                error_stage: "parse_request_json".to_string(),
+                error_kind: "invalid_json".to_string(),
+                error_message: "invalid request json body".to_string(),
+                error_detail: format!("invalid request json body: {err}"),
                 ..Default::default()
             };
+            request_log.apply_to_entry(&mut admin_entry);
+            let response = (
+                StatusCode::BAD_GATEWAY,
+                Json(proxy_error_json(
+                    502,
+                    "invalid request json body",
+                    "proxy",
+                    "parse_request_json",
+                    "invalid_json",
+                )),
+            )
+                .into_response();
+            return finalize_admin_response(&state, response, admin_entry).await;
+        }
+    };
+
+    let resolved = match resolve_upstream_for_request_from_header_map(
+        &parts.headers,
+        &parsed_body,
+        &state.config.upstream_base_url,
+        &state.config.upstream_api_key,
+    ) {
+        Ok(resolved) => resolved,
+        Err(err) => {
+            let status = err.status_code();
+            let mut admin_entry = AdminLogEntry {
+                created_at,
+                method: request_method,
+                path: request_path,
+                query: request_query,
+                remote_addr,
+                is_stream: false,
+                status_code: status.as_u16(),
+                duration_ms: started_at.elapsed().as_millis() as i64,
+                request_parse_ms: request_parse_started.elapsed().as_millis() as i64,
+                ..Default::default()
+            };
+            request_log.apply_to_entry(&mut admin_entry);
+            let response = (
+                status,
+                Json(json!({"error": {"code": status.as_u16(), "message": err.to_string()}})),
+            )
+                .into_response();
+            return finalize_admin_response(&state, response, admin_entry).await;
+        }
+    };
+    let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+
+    let target_path = format!("/v1beta/models/{rest}");
+    let is_aiapidev_upstream = is_aiapidev_base_url(&resolved.base_url);
+    let request = Request::from_parts(parts, Body::from(request_body));
+
+    match forward_gemini_request(
+        state.clone(),
+        resolved,
+        target_path,
+        request,
+        request_log.clone(),
+    )
+    .await
+    {
+        Ok((response, mut admin_entry)) => {
+            admin_entry.created_at = created_at;
+            admin_entry.method = request_method;
+            admin_entry.path = request_path;
+            admin_entry.query = request_query;
+            admin_entry.remote_addr = remote_addr;
+            admin_entry.is_stream = false;
+            admin_entry.request_parse_ms += request_parse_ms;
+            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
+            finalize_admin_response(&state, response, admin_entry).await
+        }
+        Err(failure) => {
+            let mut admin_entry = failure.admin_entry;
+            admin_entry.created_at = created_at;
+            admin_entry.method = request_method;
+            admin_entry.path = request_path;
+            admin_entry.query = request_query;
+            admin_entry.remote_addr = remote_addr;
+            admin_entry.is_stream = false;
+            admin_entry.status_code = StatusCode::BAD_GATEWAY.as_u16();
+            admin_entry.request_parse_ms += request_parse_ms;
+            admin_entry.duration_ms = started_at.elapsed().as_millis() as i64;
             let response = if !is_aiapidev_upstream {
-                if let Some(structured) = classify_standard_proxy_error_detail(&err) {
+                if let Some(structured) = classify_standard_proxy_error_detail(&failure.error) {
                     apply_structured_proxy_error(&mut admin_entry, &structured);
                     build_structured_proxy_error_response(&structured)
-                } else if let Some(structured_error) = classify_standard_proxy_error(&err) {
+                } else if let Some(structured_error) = classify_standard_proxy_error(&failure.error)
+                {
                     (StatusCode::BAD_GATEWAY, Json(structured_error)).into_response()
                 } else {
                     (
                         StatusCode::BAD_GATEWAY,
-                        Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                        Json(json!({"error": {"code": 502, "message": failure.error.to_string()}})),
                     )
                         .into_response()
                 }
             } else {
                 (
                     StatusCode::BAD_GATEWAY,
-                    Json(json!({"error": {"code": 502, "message": err.to_string()}})),
+                    Json(json!({"error": {"code": 502, "message": failure.error.to_string()}})),
                 )
                     .into_response()
             };
@@ -423,47 +808,65 @@ async fn forward_gemini_request(
     resolved: ResolvedUpstream,
     target_path: String,
     request: Request,
-) -> Result<(Response, AdminLogEntry)> {
+    request_log: RequestLogSnapshot,
+) -> Result<(Response, AdminLogEntry), ForwardRequestFailure> {
+    let request_parse_started = Instant::now();
     let content_type_header = request.headers().get(CONTENT_TYPE).cloned();
     let accept_header = request.headers().get(ACCEPT).cloned();
     let request_query = request.uri().query().map(ToOwned::to_owned);
     let admin_enabled = state.admin.is_some();
     let request_body = to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES)
         .await
-        .map_err(|err| anyhow!("failed to read request body: {err}"))?;
-    let request_raw = admin::maybe_sanitize_json_for_log(&request_body, admin_enabled);
-
-    let body: Value = serde_json::from_slice(&request_body).map_err(|err| {
-        StructuredProxyError::new(
-            "invalid request json body",
-            "parse_request_json",
-            "invalid_json",
-            format!("invalid request json body: {err}"),
-        )
-    })?;
+        .map_err(|err| {
+            ForwardRequestFailure::new(
+                anyhow!("failed to read request body: {err}"),
+                request_log.base_entry(),
+            )
+        })?;
+    let mut admin_entry = request_log.base_entry();
+    let body: Value = match serde_json::from_slice(&request_body) {
+        Ok(body) => body,
+        Err(err) => {
+            admin_entry.request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+            return Err(ForwardRequestFailure::new(
+                StructuredProxyError::new(
+                    "invalid request json body",
+                    "parse_request_json",
+                    "invalid_json",
+                    format!("invalid request json body: {err}"),
+                ),
+                admin_entry,
+            ));
+        }
+    };
     let output_mode = get_output_mode(request_query.as_deref(), &body);
+    admin_entry.output_mode = match output_mode {
+        OutputMode::Base64 => "base64".to_string(),
+        OutputMode::Url => "url".to_string(),
+    };
     let is_aiapidev = is_aiapidev_base_url(&resolved.base_url);
+    let request_parse_ms = request_parse_started.elapsed().as_millis() as i64;
+    admin_entry.request_parse_ms = request_parse_ms;
 
     let admin_stats = state.admin.as_ref().map(|admin| admin.stats());
-    let cache_observer = admin_stats.map(|stats| {
-        Arc::new(move |_raw_url: &str, from_cache: bool| {
-            if from_cache {
-                stats
-                    .cache_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }) as Arc<dyn Fn(&str, bool) + Send + Sync>
-    });
+    let cache_tracking = build_request_cache_tracking(admin_stats);
 
     if is_aiapidev {
-        let rewritten_body = rewrite_aiapidev_request_body(body);
+        let external_proxy_prefix = state.config.resolved_external_image_proxy_prefix();
+        let rewritten_body = rewrite_aiapidev_request_body(
+            body,
+            &external_proxy_prefix,
+            &state.config.image_fetch_external_proxy_domains,
+        );
         let target_path = rewrite_aiapidev_model_path(&target_path);
         let request_upstream = if admin_enabled {
-            let request_upstream_bytes = serde_json::to_vec(&rewritten_body)?;
+            let request_upstream_bytes = serde_json::to_vec(&rewritten_body)
+                .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
             admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
         } else {
             None
         };
+        let upstream_build_started = Instant::now();
         let response = handle_aiapidev_response(
             &resolved,
             &target_path,
@@ -476,67 +879,111 @@ async fn forward_gemini_request(
             state.config.as_ref(),
         )
         .await;
+        let upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
 
-        let admin_entry = AdminLogEntry {
-            output_mode: match output_mode {
-                OutputMode::Base64 => "base64".to_string(),
-                OutputMode::Url => "url".to_string(),
-            },
-            request_raw: request_raw
-                .as_ref()
-                .map(|value| value.pretty.clone())
-                .unwrap_or_default(),
-            request_raw_images: request_raw
-                .as_ref()
-                .map(|value| value.image_urls.clone())
-                .unwrap_or_default(),
-            request_upstream: request_upstream
-                .as_ref()
-                .map(|value| value.pretty.clone())
-                .unwrap_or_default(),
-            request_upstream_images: request_upstream
-                .as_ref()
-                .map(|value| value.image_urls.clone())
-                .unwrap_or_default(),
-            status_code: response.status().as_u16(),
-            ..Default::default()
-        };
+        admin_entry.upstream_build_ms = upstream_build_ms;
+        admin_entry.request_upstream = request_upstream
+            .as_ref()
+            .map(|value| value.pretty.clone())
+            .unwrap_or_default();
+        admin_entry.request_upstream_images = request_upstream
+            .as_ref()
+            .map(|value| value.image_urls.clone())
+            .unwrap_or_default();
+        admin_entry.status_code = response.status().as_u16();
         return Ok((response, admin_entry));
     }
 
-    let materialized = materialize_request_images_with_services(
+    let request_image_prepare_started = Instant::now();
+    let request_image_materialize_started = Instant::now();
+    let materialized = match materialize_request_images_with_services(
         body,
         state.blob_runtime.as_ref(),
         &RequestMaterializeServices {
             image_client: state.image_client.clone(),
             max_image_bytes: crate::image_io::REQUEST_MAX_IMAGE_BYTES,
             allow_private_networks: false,
+            enable_webp_optimization: state.config.enable_request_image_webp_optimization,
             fetch_service: state.request_inline_data_fetch_service.clone(),
-            cache_observer,
+            cache_observer: cache_tracking.observer.clone(),
         },
     )
-    .await?;
-    let encoded = encode_request_body(
+    .await
+    {
+        Ok(materialized) => materialized,
+        Err(err) => {
+            admin_entry.request_image_prepare_ms =
+                request_image_prepare_started.elapsed().as_millis() as i64;
+            update_request_cache_hits(&mut admin_entry, &cache_tracking);
+            return Err(ForwardRequestFailure::new(err, admin_entry));
+        }
+    };
+    let request_image_materialize_ms =
+        request_image_materialize_started.elapsed().as_millis() as i64;
+    let request_encode_started = Instant::now();
+    let encoded = match encode_request_body(
         materialized.request,
         materialized.replacements.clone(),
         state.blob_runtime.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(encoded) => encoded,
+        Err(err) => {
+            admin_entry.request_image_materialize_ms = request_image_materialize_ms;
+            admin_entry.request_image_fetch_work_ms = materialized.fetch_work_ms;
+            admin_entry.request_image_store_work_ms = materialized.store_work_ms;
+            admin_entry.request_image_prepare_ms =
+                request_image_prepare_started.elapsed().as_millis() as i64;
+            update_request_cache_hits(&mut admin_entry, &cache_tracking);
+            return Err(ForwardRequestFailure::new(err, admin_entry));
+        }
+    };
+    let request_encode_ms = request_encode_started.elapsed().as_millis() as i64;
+    let request_image_prepare_ms = request_image_prepare_started.elapsed().as_millis() as i64;
+    admin_entry.request_image_prepare_ms = request_image_prepare_ms;
+    admin_entry.request_image_materialize_ms = request_image_materialize_ms;
+    admin_entry.request_image_fetch_work_ms = materialized.fetch_work_ms;
+    admin_entry.request_image_store_work_ms = materialized.store_work_ms;
+    admin_entry.request_encode_ms = request_encode_ms;
 
+    let upstream_build_started = Instant::now();
     for replacement in &materialized.replacements {
-        state.blob_runtime.remove(&replacement.blob).await?;
+        if let Err(err) = state.blob_runtime.remove(&replacement.blob).await {
+            update_request_cache_hits(&mut admin_entry, &cache_tracking);
+            return Err(ForwardRequestFailure::new(err, admin_entry));
+        }
     }
 
     let request_upstream = if admin_enabled {
-        let request_upstream_bytes = state.blob_runtime.read_bytes(&encoded.body_blob).await?;
+        let request_upstream_bytes = state
+            .blob_runtime
+            .read_bytes(&encoded.body_blob)
+            .await
+            .map_err(|err| {
+                update_request_cache_hits(&mut admin_entry, &cache_tracking);
+                ForwardRequestFailure::new(err, admin_entry.clone())
+            })?;
         admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
     } else {
         None
     };
     let upstream_url =
-        build_upstream_url(&resolved.base_url, &target_path, request_query.as_deref())?;
+        build_upstream_url(&resolved.base_url, &target_path, request_query.as_deref()).map_err(
+            |err| {
+                update_request_cache_hits(&mut admin_entry, &cache_tracking);
+                ForwardRequestFailure::new(err, admin_entry.clone())
+            },
+        )?;
 
-    let reader = state.blob_runtime.open_reader(&encoded.body_blob).await?;
+    let reader = state
+        .blob_runtime
+        .open_reader(&encoded.body_blob)
+        .await
+        .map_err(|err| {
+            update_request_cache_hits(&mut admin_entry, &cache_tracking);
+            ForwardRequestFailure::new(err, admin_entry.clone())
+        })?;
     let request_stream = ReaderStream::new(reader);
     let mut upstream_request = state
         .upstream_client
@@ -556,37 +1003,35 @@ async fn forward_gemini_request(
     let upstream_response = match upstream_request.send().await {
         Ok(response) => response,
         Err(err) => {
-            state.blob_runtime.remove(&encoded.body_blob).await?;
-            return Err(err.into());
+            if let Err(remove_err) = state.blob_runtime.remove(&encoded.body_blob).await {
+                update_request_cache_hits(&mut admin_entry, &cache_tracking);
+                return Err(ForwardRequestFailure::new(remove_err, admin_entry));
+            }
+            update_request_cache_hits(&mut admin_entry, &cache_tracking);
+            return Err(ForwardRequestFailure::new(err, admin_entry));
         }
     };
-    state.blob_runtime.remove(&encoded.body_blob).await?;
+    state
+        .blob_runtime
+        .remove(&encoded.body_blob)
+        .await
+        .map_err(|err| {
+            update_request_cache_hits(&mut admin_entry, &cache_tracking);
+            ForwardRequestFailure::new(err, admin_entry.clone())
+        })?;
+    let upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
+    admin_entry.upstream_build_ms = upstream_build_ms;
+    update_request_cache_hits(&mut admin_entry, &cache_tracking);
+    admin_entry.request_upstream = request_upstream
+        .as_ref()
+        .map(|value| value.pretty.clone())
+        .unwrap_or_default();
+    admin_entry.request_upstream_images = request_upstream
+        .as_ref()
+        .map(|value| value.image_urls.clone())
+        .unwrap_or_default();
 
-    let mut admin_entry = AdminLogEntry {
-        output_mode: match output_mode {
-            OutputMode::Base64 => "base64".to_string(),
-            OutputMode::Url => "url".to_string(),
-        },
-        request_raw: request_raw
-            .as_ref()
-            .map(|value| value.pretty.clone())
-            .unwrap_or_default(),
-        request_raw_images: request_raw
-            .as_ref()
-            .map(|value| value.image_urls.clone())
-            .unwrap_or_default(),
-        request_upstream: request_upstream
-            .as_ref()
-            .map(|value| value.pretty.clone())
-            .unwrap_or_default(),
-        request_upstream_images: request_upstream
-            .as_ref()
-            .map(|value| value.image_urls.clone())
-            .unwrap_or_default(),
-        ..Default::default()
-    };
-
-    let response = handle_non_stream_response(
+    let (response, response_durations) = match handle_non_stream_response(
         upstream_response,
         output_mode,
         &state.image_client,
@@ -595,8 +1040,70 @@ async fn forward_gemini_request(
         state.blob_runtime.as_ref(),
         state.config.as_ref(),
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => return Err(ForwardRequestFailure::new(err, admin_entry)),
+    };
     admin_entry.status_code = response.status().as_u16();
+    admin_entry.response_process_ms = response_durations.response_process_ms;
+    admin_entry.upload_ms = response_durations.upload_ms;
+    Ok((response, admin_entry))
+}
+
+async fn forward_openai_image_request(
+    state: AppState,
+    resolved: ResolvedUpstream,
+    request_body: Value,
+    request_query: Option<String>,
+    request_log: RequestLogSnapshot,
+) -> Result<(Response, AdminLogEntry), ForwardRequestFailure> {
+    let admin_enabled = state.admin.is_some();
+    let mut admin_entry = request_log.base_entry();
+    admin_entry.output_mode = "url".to_string();
+
+    let request_upstream = if admin_enabled {
+        let request_upstream_bytes = serde_json::to_vec(&request_body)
+            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+        admin::maybe_sanitize_json_for_log(&request_upstream_bytes, true)
+    } else {
+        None
+    };
+
+    let upstream_build_started = Instant::now();
+    let upstream_url = build_upstream_url(
+        &resolved.base_url,
+        "/v1/images/generations",
+        request_query.as_deref(),
+    )
+    .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+    let upstream_response = state
+        .upstream_client
+        .post(upstream_url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, format!("Bearer {}", resolved.api_key))
+        .json(&request_body)
+        .send()
+        .await
+        .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+
+    admin_entry.upstream_build_ms = upstream_build_started.elapsed().as_millis() as i64;
+    admin_entry.request_upstream = request_upstream
+        .as_ref()
+        .map(|value| value.pretty.clone())
+        .unwrap_or_default();
+    admin_entry.request_upstream_images = request_upstream
+        .as_ref()
+        .map(|value| value.image_urls.clone())
+        .unwrap_or_default();
+
+    let (response, response_durations) =
+        handle_openai_image_response(upstream_response, state.uploader.as_ref(), state.config.as_ref())
+            .await
+            .map_err(|err| ForwardRequestFailure::new(err, admin_entry.clone()))?;
+    admin_entry.status_code = response.status().as_u16();
+    admin_entry.response_process_ms = response_durations.response_process_ms;
+    admin_entry.upload_ms = response_durations.upload_ms;
     Ok((response, admin_entry))
 }
 
@@ -608,7 +1115,8 @@ async fn handle_non_stream_response(
     uploader: &Uploader,
     blob_runtime: &BlobRuntime,
     config: &Config,
-) -> Result<Response> {
+) -> Result<(Response, ResponseStageDurations)> {
+    let response_started = Instant::now();
     let status = upstream_response.status();
     let content_type = upstream_response
         .headers()
@@ -631,7 +1139,13 @@ async fn handle_non_stream_response(
         let mut response = Response::new(response_body);
         *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
         response.headers_mut().insert(CONTENT_TYPE, content_type);
-        return Ok(response);
+        return Ok((
+            response,
+            ResponseStageDurations {
+                response_process_ms: response_started.elapsed().as_millis() as i64,
+                upload_ms: 0,
+            },
+        ));
     }
 
     let json_body: Value = match serde_json::from_slice(&body_bytes) {
@@ -640,7 +1154,13 @@ async fn handle_non_stream_response(
             let mut response = Response::new(Body::from(body_bytes));
             *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
             response.headers_mut().insert(CONTENT_TYPE, content_type);
-            return Ok(response);
+            return Ok((
+                response,
+                ResponseStageDurations {
+                    response_process_ms: response_started.elapsed().as_millis() as i64,
+                    upload_ms: 0,
+                },
+            ));
         }
     };
 
@@ -655,14 +1175,110 @@ async fn handle_non_stream_response(
     remove_thought_signatures(&mut final_json);
     final_json = keep_largest_inline_image(final_json);
     optimize_inline_data_images(&mut final_json, config)?;
+    let mut upload_ms = 0_i64;
     if output_mode == OutputMode::Url {
+        let upload_started = Instant::now();
         finalize_output_urls(&mut final_json, blob_runtime, uploader, config).await?;
+        upload_ms = upload_started.elapsed().as_millis() as i64;
     }
     let final_body = serde_json::to_vec(&final_json)?;
     let mut response = Response::new(Body::from(final_body));
     *response.status_mut() = StatusCode::from_u16(status.as_u16())?;
     response.headers_mut().insert(CONTENT_TYPE, content_type);
-    Ok(response)
+    let total_process_ms = response_started.elapsed().as_millis() as i64;
+    Ok((
+        response,
+        ResponseStageDurations {
+            response_process_ms: total_process_ms.saturating_sub(upload_ms),
+            upload_ms,
+        },
+    ))
+}
+
+async fn handle_openai_image_response(
+    upstream_response: reqwest::Response,
+    uploader: &Uploader,
+    config: &Config,
+) -> Result<(Response, ResponseStageDurations)> {
+    let response_started = Instant::now();
+    let status = upstream_response.status();
+    let content_type = upstream_response
+        .headers()
+        .get(CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("application/json"));
+    let body_bytes = upstream_response.bytes().await.map_err(|err| {
+        StructuredProxyError::new(
+            "failed to read upstream response body",
+            "read_upstream_body",
+            "body_truncated",
+            err.to_string(),
+        )
+    })?;
+
+    if !status.is_success() {
+        let response = raw_reqwest_response_with_body(status, content_type, body_bytes.to_vec());
+        return Ok((
+            response,
+            ResponseStageDurations {
+                response_process_ms: response_started.elapsed().as_millis() as i64,
+                upload_ms: 0,
+            },
+        ));
+    }
+
+    let upstream_body: Value = serde_json::from_slice(&body_bytes).map_err(|err| {
+        StructuredProxyError::new(
+            "failed to parse upstream response json",
+            "parse_upstream_response",
+            "invalid_json",
+            err.to_string(),
+        )
+    })?;
+    let base64_images = extract_openai_b64_json_entries(&upstream_body)?;
+
+    let upload_started = Instant::now();
+    let mut uploaded = Vec::with_capacity(base64_images.len());
+    for base64_image in base64_images {
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(base64_image.as_bytes())
+            .map_err(|err| {
+                StructuredProxyError::new(
+                    "failed to decode upstream b64_json",
+                    "decode_b64_json",
+                    "invalid_base64",
+                    err.to_string(),
+                )
+            })?;
+        let mime_type = crate::image_io::sniff_image_mime_type(&decoded).unwrap_or("image/png");
+        let upload_result = uploader
+            .upload_inline_data_base64(Arc::from(base64_image.as_str()), mime_type)
+            .await?;
+        let final_url = build_openai_image_output_url(config, &upload_result.provider, &upload_result.url);
+        uploaded.push(crate::openai_image::UploadedImage { url: final_url });
+    }
+    let upload_ms = upload_started.elapsed().as_millis() as i64;
+
+    let fallback_created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let final_json =
+        crate::openai_image::build_response_payload(upstream_body, &uploaded, fallback_created)?;
+    let final_body = serde_json::to_vec(&final_json)?;
+    let mut response = Response::new(Body::from(final_body));
+    *response.status_mut() = StatusCode::OK;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let total_process_ms = response_started.elapsed().as_millis() as i64;
+    Ok((
+        response,
+        ResponseStageDurations {
+            response_process_ms: total_process_ms.saturating_sub(upload_ms),
+            upload_ms,
+        },
+    ))
 }
 
 async fn handle_aiapidev_response(
@@ -946,6 +1562,14 @@ async fn raw_reqwest_response(upstream_response: reqwest::Response) -> Response 
         }
     };
 
+    raw_reqwest_response_with_body(status, content_type, body_bytes.to_vec())
+}
+
+fn raw_reqwest_response_with_body(
+    status: reqwest::StatusCode,
+    content_type: HeaderValue,
+    body_bytes: Vec<u8>,
+) -> Response {
     let mut response = Response::new(Body::from(body_bytes));
     *response.status_mut() =
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -1129,6 +1753,58 @@ fn query_contains_output_url(query: Option<&str>) -> bool {
         .any(|(key, value)| key == "output" && value.trim().eq_ignore_ascii_case("url"))
 }
 
+fn extract_openai_b64_json_entries(body: &Value) -> Result<Vec<String>> {
+    let data = body
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            StructuredProxyError::new(
+                "upstream response missing data",
+                "rewrite_openai_image_response",
+                "missing_data",
+                "upstream response missing data array",
+            )
+        })?;
+    if data.is_empty() {
+        return Err(StructuredProxyError::new(
+            "upstream response missing data",
+            "rewrite_openai_image_response",
+            "missing_data",
+            "upstream response data array is empty",
+        )
+        .into());
+    }
+
+    data.iter()
+        .map(|item| {
+            item.get("b64_json")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    StructuredProxyError::new(
+                        "upstream response missing b64_json",
+                        "rewrite_openai_image_response",
+                        "missing_b64_json",
+                        "upstream response missing data[].b64_json",
+                    )
+                    .into()
+                })
+        })
+        .collect()
+}
+
+fn build_openai_image_output_url(config: &Config, provider: &str, target_url: &str) -> String {
+    let external_proxy_prefix = config.resolved_external_image_proxy_prefix();
+    if config.proxy_standard_output_urls
+        && !provider.eq_ignore_ascii_case("r2")
+        && !external_proxy_prefix.trim().is_empty()
+    {
+        return wrap_external_proxy_url(&external_proxy_prefix, target_url);
+    }
+    target_url.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1136,12 +1812,14 @@ mod tests {
     use axum::extract::{Path as AxumPath, State as AxumState};
     use axum::http::Uri;
     use axum::http::header::AUTHORIZATION;
+    use axum::http::header::CONTENT_TYPE;
     use axum::response::IntoResponse;
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use serde_json::json;
     use std::collections::VecDeque;
     use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
     use tower::make::Shared;
@@ -1343,6 +2021,7 @@ mod tests {
             resolved,
             "/v1beta/models/gemini-3-pro-image-preview:generateContent".to_string(),
             request,
+            RequestLogSnapshot::default(),
         )
         .await
         .unwrap();
@@ -1370,6 +2049,140 @@ mod tests {
                 .get("inlineData")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn request_cache_tracking_records_per_request_cache_hits() {
+        let stats = Arc::new(crate::admin::AdminStats::default());
+        let tracking = build_request_cache_tracking(Some(Arc::clone(&stats)));
+        let observer = tracking.observer.as_ref().unwrap();
+
+        observer("https://img.example/first.png", false);
+        observer("https://img.example/first.png", true);
+        observer("https://img.example/second.png", true);
+
+        assert_eq!(
+            stats.cache_hits.load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            tracking.hit_urls.lock().unwrap().clone(),
+            vec![
+                "https://img.example/first.png".to_string(),
+                "https://img.example/second.png".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_action_admin_success_sanitizes_request_body_once() {
+        let upstream_addr = spawn_generate_content_server(json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{
+                        "text": "ok"
+                    }]
+                }
+            }]
+        }))
+        .await;
+
+        let mut config = crate::test_config();
+        config.admin_password = "pw".to_string();
+        config.upstream_base_url = format!("http://{upstream_addr}");
+        config.upstream_api_key = "env-key".to_string();
+        let admin = Arc::new(AdminState::new("pw".to_string()));
+        let state = test_app_state(config.clone(), Some(Arc::clone(&admin)));
+
+        let response = model_action(
+            State(state),
+            Path("demo:generateContent".to_string()),
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "contents": [{
+                            "parts": [{
+                                "text": "hello"
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let logs = admin.snapshot_logs().await;
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].request_raw.contains("\"text\": \"hello\""));
+    }
+
+    #[tokio::test]
+    async fn model_action_failure_preserves_request_cache_hits_in_admin_log() {
+        let image_request_count = Arc::new(AtomicUsize::new(0));
+        let image_addr = spawn_image_server(Arc::clone(&image_request_count)).await;
+        let image_url = format!("http://{image_addr}/image.png");
+
+        let mut config = crate::test_config();
+        config.admin_password = "pw".to_string();
+        config.upstream_base_url = "http://127.0.0.1:9".to_string();
+        config.upstream_api_key = "env-key".to_string();
+        config.inline_data_url_memory_cache_max_bytes = 1024;
+        config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+        config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
+        let request_fetch_service = crate::cache::InlineDataUrlFetchService::from_config(
+            &config,
+            reqwest::Client::new(),
+            crate::image_io::REQUEST_MAX_IMAGE_BYTES,
+            true,
+        )
+        .unwrap();
+        let first_fetch = request_fetch_service.fetch(&image_url).await.unwrap();
+        assert!(!first_fetch.from_cache);
+
+        let admin = Arc::new(AdminState::new("pw".to_string()));
+        let mut state = test_app_state(config, Some(Arc::clone(&admin)));
+        state.request_inline_data_fetch_service = Some(request_fetch_service);
+
+        let response = model_action(
+            State(state),
+            Path("demo:generateContent".to_string()),
+            Request::builder()
+                .method("POST")
+                .uri("/v1beta/models/demo:generateContent")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "contents": [{
+                            "parts": [{
+                                "inlineData": {
+                                    "data": image_url
+                                }
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let logs = admin.snapshot_logs().await;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_raw_image_cache_hits, vec![image_url]);
+        assert_eq!(
+            admin
+                .stats()
+                .cache_hits
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(image_request_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -1768,5 +2581,62 @@ mod tests {
             return parsed.path().to_string();
         }
         uri.path().to_string()
+    }
+
+    fn test_app_state(config: Config, admin: Option<Arc<AdminState>>) -> AppState {
+        let uploader_config = config.clone();
+        AppState {
+            upstream_client: build_upstream_client(&config),
+            image_client: reqwest::Client::new(),
+            uploader: Arc::new(Uploader::new(reqwest::Client::new(), uploader_config)),
+            admin,
+            request_inline_data_fetch_service: None,
+            response_inline_data_fetch_service: None,
+            blob_runtime: Arc::new(crate::test_blob_runtime(8 * 1024 * 1024)),
+            config: Arc::new(config),
+        }
+    }
+
+    async fn spawn_generate_content_server(body: Value) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1beta/models/demo:generateContent",
+                post(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        address
+    }
+
+    async fn spawn_image_server(request_count: Arc<AtomicUsize>) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/image.png",
+                get(move || {
+                    let request_count = Arc::clone(&request_count);
+                    async move {
+                        request_count.fetch_add(1, Ordering::Relaxed);
+                        (
+                            StatusCode::OK,
+                            [(CONTENT_TYPE, HeaderValue::from_static("image/png"))],
+                            vec![137, 80, 78, 71, 13, 10, 26, 10],
+                        )
+                    }
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        address
     }
 }

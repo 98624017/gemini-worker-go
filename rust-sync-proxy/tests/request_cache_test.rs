@@ -67,6 +67,7 @@ async fn request_cache_background_bridge_reuses_inflight_download() {
             .is_some()
     );
 
+    tokio::time::sleep(Duration::from_millis(60)).await;
     let second = service.fetch(&url).await.unwrap();
     assert_eq!(second.mime_type, "image/png");
     assert_eq!(
@@ -133,6 +134,7 @@ async fn request_materialize_reuses_fetch_service_cache_between_calls() {
             image_client: reqwest::Client::new(),
             max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
             allow_private_networks: true,
+            enable_webp_optimization: false,
             fetch_service: Some(service.clone()),
             cache_observer: None,
         },
@@ -146,6 +148,7 @@ async fn request_materialize_reuses_fetch_service_cache_between_calls() {
             image_client: reqwest::Client::new(),
             max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
             allow_private_networks: true,
+            enable_webp_optimization: false,
             fetch_service: Some(service),
             cache_observer: None,
         },
@@ -156,6 +159,82 @@ async fn request_materialize_reuses_fetch_service_cache_between_calls() {
     assert_eq!(first.replacements.len(), 1);
     assert_eq!(second.replacements.len(), 1);
     assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn request_materialize_keeps_large_cached_bytes_in_memory_without_spill() {
+    let large_image = vec![5_u8; 4096];
+    let (address, _request_count) = spawn_custom_image_server(large_image, "image/jpeg", 0).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 16 * 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_millis(100);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_millis(500);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let runtime = rust_sync_proxy::BlobRuntime::new(rust_sync_proxy::BlobRuntimeConfig {
+        inline_max_bytes: 1024,
+        request_hot_budget_bytes: 1024,
+        global_hot_budget_bytes: 8 * 1024,
+        spill_dir: std::env::temp_dir()
+            .join(format!("rust-sync-proxy-request-cache-{}", now_unix_ms())),
+    });
+    let request = json!({
+        "contents": [{
+            "parts": [{
+                "inlineData": {
+                    "data": format!("http://{address}/image.png")
+                }
+            }]
+        }]
+    });
+
+    rust_sync_proxy::request_materialize::materialize_request_images_with_services(
+        request.clone(),
+        &runtime,
+        &rust_sync_proxy::request_materialize::RequestMaterializeServices {
+            image_client: reqwest::Client::new(),
+            max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+            allow_private_networks: true,
+            enable_webp_optimization: false,
+            fetch_service: Some(service.clone()),
+            cache_observer: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let cache_hit = Arc::new(AtomicUsize::new(0));
+    let second = rust_sync_proxy::request_materialize::materialize_request_images_with_services(
+        request,
+        &runtime,
+        &rust_sync_proxy::request_materialize::RequestMaterializeServices {
+            image_client: reqwest::Client::new(),
+            max_image_bytes: rust_sync_proxy::image_io::DEFAULT_MAX_IMAGE_BYTES,
+            allow_private_networks: true,
+            enable_webp_optimization: false,
+            fetch_service: Some(service),
+            cache_observer: Some({
+                let cache_hit = Arc::clone(&cache_hit);
+                Arc::new(move |_url, from_cache| {
+                    if from_cache {
+                        cache_hit.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            }),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(cache_hit.load(Ordering::Relaxed), 1);
+    assert!(runtime.is_inline(&second.replacements[0].blob).await);
+    assert_eq!(runtime.stats_snapshot().spill_count, 1);
 }
 
 #[tokio::test]
@@ -184,12 +263,43 @@ async fn request_cache_retries_once_after_connection_drops_before_headers() {
 }
 
 #[tokio::test]
-async fn request_cache_stores_large_png_as_lossless_webp() {
+async fn request_cache_keeps_large_png_when_request_webp_optimization_is_disabled() {
     let png = noisy_png_bytes(2048, 1536);
     assert!(png.len() > 10 * 1024 * 1024, "png too small: {}", png.len());
 
     let (address, request_count) = spawn_custom_image_server(png, "image/png", 0).await;
     let mut config = rust_sync_proxy::test_config();
+    config.inline_data_url_memory_cache_max_bytes = 64 * 1024 * 1024;
+    config.inline_data_url_background_fetch_wait_timeout = Duration::from_secs(2);
+    config.inline_data_url_background_fetch_total_timeout = Duration::from_secs(5);
+    let service = rust_sync_proxy::cache::InlineDataUrlFetchService::from_config(
+        &config,
+        reqwest::Client::new(),
+        rust_sync_proxy::image_io::REQUEST_MAX_IMAGE_BYTES,
+        true,
+    )
+    .unwrap();
+
+    let url = format!("http://{address}/image.png");
+    let first = service.fetch(&url).await.unwrap();
+    assert_eq!(first.mime_type, "image/png");
+    assert!(!first.from_cache);
+
+    let second = service.fetch(&url).await.unwrap();
+    assert_eq!(second.mime_type, "image/png");
+    assert!(second.from_cache);
+    assert_eq!(second.bytes, first.bytes);
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn request_cache_stores_large_png_as_lossless_webp_when_enabled() {
+    let png = noisy_png_bytes(2048, 1536);
+    assert!(png.len() > 10 * 1024 * 1024, "png too small: {}", png.len());
+
+    let (address, request_count) = spawn_custom_image_server(png, "image/png", 0).await;
+    let mut config = rust_sync_proxy::test_config();
+    config.enable_request_image_webp_optimization = true;
     config.inline_data_url_memory_cache_max_bytes = 64 * 1024 * 1024;
     config.inline_data_url_background_fetch_wait_timeout = Duration::from_secs(2);
     config.inline_data_url_background_fetch_total_timeout = Duration::from_secs(5);
@@ -241,6 +351,13 @@ async fn request_cache_does_not_retry_non_retryable_status() {
 
 async fn spawn_image_server(delay_ms: u64) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
     spawn_custom_image_server(vec![137, 80, 78, 71, 13, 10, 26, 10], "image/png", delay_ms).await
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
 }
 
 async fn spawn_custom_image_server(

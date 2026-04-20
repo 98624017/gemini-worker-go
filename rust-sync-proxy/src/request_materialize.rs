@@ -8,7 +8,10 @@ use tokio::task::JoinSet;
 
 use crate::blob_runtime::{BlobHandle, BlobRuntime};
 use crate::cache::InlineDataUrlFetchService;
-use crate::image_io::{FetchedBlob, REQUEST_MAX_IMAGE_BYTES, fetch_image_into_blob};
+use crate::image_io::{
+    FetchedBlob, REQUEST_MAX_IMAGE_BYTES, fetch_image_as_inline_data_with_options,
+    maybe_convert_large_png_to_lossless_webp,
+};
 use crate::request_scan::scan_request_image_urls;
 
 const MAX_CONCURRENT_REQUEST_IMAGE_FETCHES: usize = 4;
@@ -24,6 +27,8 @@ pub struct RequestReplacement {
 pub struct MaterializedRequestImages {
     pub request: Value,
     pub replacements: Vec<RequestReplacement>,
+    pub fetch_work_ms: i64,
+    pub store_work_ms: i64,
 }
 
 #[derive(Clone)]
@@ -31,8 +36,15 @@ pub struct RequestMaterializeServices {
     pub image_client: reqwest::Client,
     pub max_image_bytes: usize,
     pub allow_private_networks: bool,
+    pub enable_webp_optimization: bool,
     pub fetch_service: Option<Arc<InlineDataUrlFetchService>>,
     pub cache_observer: Option<Arc<dyn Fn(&str, bool) + Send + Sync>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RequestImageWorkDurations {
+    fetch_work_ms: i64,
+    store_work_ms: i64,
 }
 
 pub async fn materialize_request_images(
@@ -44,6 +56,7 @@ pub async fn materialize_request_images(
         image_client: client.clone(),
         max_image_bytes: REQUEST_MAX_IMAGE_BYTES,
         allow_private_networks: true,
+        enable_webp_optimization: false,
         fetch_service: None,
         cache_observer: None,
     };
@@ -83,9 +96,13 @@ pub async fn materialize_request_images_with_services(
     }
 
     let mut fetched_by_url = HashMap::new();
+    let mut fetch_work_ms = 0_i64;
+    let mut store_work_ms = 0_i64;
     while let Some(result) = fetches.join_next().await {
-        let (url, fetched) =
+        let (url, fetched, durations) =
             result.map_err(|err| anyhow!("request image fetch task failed: {err}"))??;
+        fetch_work_ms += durations.fetch_work_ms;
+        store_work_ms += durations.store_work_ms;
         fetched_by_url.insert(url, fetched);
     }
 
@@ -104,6 +121,8 @@ pub async fn materialize_request_images_with_services(
     Ok(MaterializedRequestImages {
         request,
         replacements,
+        fetch_work_ms,
+        store_work_ms,
     })
 }
 
@@ -111,28 +130,62 @@ async fn fetch_request_image(
     url: String,
     runtime: &BlobRuntime,
     services: &RequestMaterializeServices,
-) -> Result<(String, FetchedBlob)> {
+) -> Result<(String, FetchedBlob, RequestImageWorkDurations)> {
     let fetched = if let Some(fetch_service) = &services.fetch_service {
+        let fetch_started = std::time::Instant::now();
         let fetched = fetch_service.fetch(&url).await?;
+        let fetch_work_ms = fetch_started.elapsed().as_millis() as i64;
         if let Some(observer) = &services.cache_observer {
             observer(&url, fetched.from_cache);
         }
-        FetchedBlob {
-            mime_type: fetched.mime_type.clone(),
-            blob: runtime
-                .store_bytes(fetched.bytes.to_vec(), fetched.mime_type)
-                .await?,
-        }
+        let store_started = std::time::Instant::now();
+        let blob = if fetched.from_cache {
+            runtime
+                .store_external_shared_bytes(fetched.bytes, fetched.mime_type.clone())
+                .await?
+        } else {
+            runtime
+                .store_shared_bytes(fetched.bytes, fetched.mime_type.clone())
+                .await?
+        };
+        (
+            FetchedBlob {
+                mime_type: fetched.mime_type,
+                blob,
+            },
+            RequestImageWorkDurations {
+                fetch_work_ms,
+                store_work_ms: store_started.elapsed().as_millis() as i64,
+            },
+        )
     } else {
-        fetch_image_into_blob(
+        let fetch_started = std::time::Instant::now();
+        let fetched = fetch_image_as_inline_data_with_options(
             &services.image_client,
-            runtime,
             &url,
             services.max_image_bytes,
             services.allow_private_networks,
         )
-        .await?
+        .await?;
+        let fetch_work_ms = fetch_started.elapsed().as_millis() as i64;
+        let store_started = std::time::Instant::now();
+        let fetched = if services.enable_webp_optimization {
+            maybe_convert_large_png_to_lossless_webp(fetched).await?
+        } else {
+            fetched
+        };
+        let mime_type = fetched.mime_type.clone();
+        let blob = runtime
+            .store_shared_bytes(fetched.bytes, mime_type.clone())
+            .await?;
+        (
+            FetchedBlob { mime_type, blob },
+            RequestImageWorkDurations {
+                fetch_work_ms,
+                store_work_ms: store_started.elapsed().as_millis() as i64,
+            },
+        )
     };
 
-    Ok((url, fetched))
+    Ok((url, fetched.0, fetched.1))
 }

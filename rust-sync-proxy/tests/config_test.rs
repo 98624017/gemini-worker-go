@@ -9,12 +9,16 @@ fn defaults_match_runtime_expectations() {
     assert_eq!(cfg.upstream_timeout, Duration::from_millis(600_000));
     assert_eq!(cfg.upstream_connect_timeout, Duration::from_millis(10_000));
     assert_eq!(cfg.upstream_tcp_keepalive, Duration::from_millis(30_000));
-    assert_eq!(cfg.upstream_pool_idle_timeout, Duration::from_millis(15_000));
+    assert_eq!(
+        cfg.upstream_pool_idle_timeout,
+        Duration::from_millis(15_000)
+    );
     assert_eq!(cfg.image_host_mode.as_str(), "legacy");
     assert_eq!(cfg.slow_log_threshold, Duration::from_millis(100_000));
     assert_eq!(cfg.image_fetch_timeout, Duration::from_millis(20_000));
     assert_eq!(cfg.upload_timeout, Duration::from_millis(20_000));
     assert!(!cfg.enable_image_compression);
+    assert!(!cfg.enable_request_image_webp_optimization);
     assert_eq!(
         cfg.image_tls_handshake_timeout,
         Duration::from_millis(15_000)
@@ -74,6 +78,16 @@ fn image_compression_flag_can_be_enabled_from_env() {
 }
 
 #[test]
+fn request_image_webp_optimization_flag_can_be_enabled_from_env() {
+    let env = HashMap::from([(
+        "ENABLE_REQUEST_IMAGE_WEBP_OPTIMIZATION".to_string(),
+        "true".to_string(),
+    )]);
+    let cfg = rust_sync_proxy::config::Config::from_env_map(&env).unwrap();
+    assert!(cfg.enable_request_image_webp_optimization);
+}
+
+#[test]
 fn image_compression_jpeg_quality_can_be_overridden_from_env() {
     let env = HashMap::from([(
         "IMAGE_COMPRESSION_JPEG_QUALITY".to_string(),
@@ -98,10 +112,7 @@ fn upstream_http_timeouts_can_be_overridden_from_env() {
             "UPSTREAM_CONNECT_TIMEOUT_MS".to_string(),
             "4321".to_string(),
         ),
-        (
-            "UPSTREAM_TCP_KEEPALIVE_MS".to_string(),
-            "21000".to_string(),
-        ),
+        ("UPSTREAM_TCP_KEEPALIVE_MS".to_string(), "21000".to_string()),
         (
             "UPSTREAM_POOL_IDLE_TIMEOUT_MS".to_string(),
             "9000".to_string(),

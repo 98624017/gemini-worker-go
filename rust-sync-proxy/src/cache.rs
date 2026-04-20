@@ -72,6 +72,7 @@ pub struct InlineDataUrlFetchService {
     client: reqwest::Client,
     max_image_bytes: usize,
     allow_private_networks: bool,
+    optimize_large_png_as_webp: bool,
     external_proxy_domains: Vec<String>,
     memory_cache: Option<Arc<MemoryCache>>,
     disk_cache: Option<Arc<DiskCache>>,
@@ -125,6 +126,40 @@ impl InlineDataUrlFetchService {
         max_image_bytes: usize,
         allow_private_networks: bool,
     ) -> Option<Arc<Self>> {
+        Self::from_config_with_png_optimization(
+            config,
+            client,
+            max_image_bytes,
+            allow_private_networks,
+            config.enable_request_image_webp_optimization,
+            config.inline_data_url_background_fetch_max_inflight,
+        )
+    }
+
+    pub fn from_response_config(
+        config: &crate::config::Config,
+        client: reqwest::Client,
+        max_image_bytes: usize,
+        allow_private_networks: bool,
+    ) -> Option<Arc<Self>> {
+        Self::from_config_with_png_optimization(
+            config,
+            client,
+            max_image_bytes,
+            allow_private_networks,
+            false,
+            0,
+        )
+    }
+
+    fn from_config_with_png_optimization(
+        config: &crate::config::Config,
+        client: reqwest::Client,
+        max_image_bytes: usize,
+        allow_private_networks: bool,
+        optimize_large_png_as_webp: bool,
+        max_inflight: usize,
+    ) -> Option<Arc<Self>> {
         if config.inline_data_url_cache_dir.trim().is_empty()
             && config
                 .inline_data_url_background_fetch_total_timeout
@@ -158,13 +193,14 @@ impl InlineDataUrlFetchService {
             client,
             max_image_bytes,
             allow_private_networks,
+            optimize_large_png_as_webp,
             external_proxy_domains: config.image_fetch_external_proxy_domains.clone(),
             memory_cache,
             disk_cache,
             inflight: Arc::new(Mutex::new(HashMap::new())),
             wait_timeout: config.inline_data_url_background_fetch_wait_timeout,
             total_timeout: config.inline_data_url_background_fetch_total_timeout,
-            max_inflight: config.inline_data_url_background_fetch_max_inflight,
+            max_inflight,
         }))
     }
 
@@ -274,7 +310,7 @@ impl InlineDataUrlFetchService {
     }
 
     async fn fetch_once(&self, fetch_url: &str) -> Result<FetchedInlineData> {
-        fetch_and_optimize_with_total_timeout(
+        let fetched = fetch_and_optimize_with_total_timeout(
             self.total_timeout,
             fetch_image_as_inline_data_with_options(
                 &self.client,
@@ -282,9 +318,15 @@ impl InlineDataUrlFetchService {
                 self.max_image_bytes,
                 self.allow_private_networks,
             ),
-            |fetched| maybe_convert_large_png_to_lossless_webp(fetched),
+            |fetched| async move { Ok(fetched) },
         )
-        .await
+        .await?;
+
+        if self.optimize_large_png_as_webp {
+            maybe_convert_large_png_to_lossless_webp(fetched).await
+        } else {
+            Ok(fetched)
+        }
     }
 
     async fn store_in_caches(&self, raw_url: &str, hit: &CachedInlineData) {
@@ -595,6 +637,7 @@ mod tests {
             client: reqwest::Client::new(),
             max_image_bytes: crate::image_io::DEFAULT_MAX_IMAGE_BYTES,
             allow_private_networks: true,
+            optimize_large_png_as_webp: true,
             external_proxy_domains: Vec::new(),
             memory_cache: None,
             disk_cache: None,

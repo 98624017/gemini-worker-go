@@ -39,6 +39,15 @@ pub struct AdminLogEntry {
     pub output_mode: String,
     pub status_code: u16,
     pub duration_ms: i64,
+    pub request_parse_ms: i64,
+    pub request_image_prepare_ms: i64,
+    pub request_image_materialize_ms: i64,
+    pub request_image_fetch_work_ms: i64,
+    pub request_image_store_work_ms: i64,
+    pub request_encode_ms: i64,
+    pub upstream_build_ms: i64,
+    pub response_process_ms: i64,
+    pub upload_ms: i64,
     pub finish_reason: String,
     pub request_raw: String,
     pub request_raw_images: Vec<String>,
@@ -61,6 +70,15 @@ pub struct AdminStats {
     pub total_requests: AtomicI64,
     pub error_requests: AtomicI64,
     pub total_duration_ms: AtomicI64,
+    pub request_parse_ms: AtomicI64,
+    pub request_image_prepare_ms: AtomicI64,
+    pub request_image_materialize_ms: AtomicI64,
+    pub request_image_fetch_work_ms: AtomicI64,
+    pub request_image_store_work_ms: AtomicI64,
+    pub request_encode_ms: AtomicI64,
+    pub upstream_build_ms: AtomicI64,
+    pub response_process_ms: AtomicI64,
+    pub upload_ms: AtomicI64,
     pub cache_hits: AtomicI64,
 }
 
@@ -83,6 +101,15 @@ struct AdminStatsPayload {
     total_requests: i64,
     error_requests: i64,
     total_duration_ms: i64,
+    request_parse_ms: i64,
+    request_image_prepare_ms: i64,
+    request_image_materialize_ms: i64,
+    request_image_fetch_work_ms: i64,
+    request_image_store_work_ms: i64,
+    request_encode_ms: i64,
+    upstream_build_ms: i64,
+    response_process_ms: i64,
+    upload_ms: i64,
     cache_hits: i64,
     spill_count: u64,
     spill_bytes_total: u64,
@@ -365,8 +392,16 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .c-purple{ --accent: var(--accent-purple); }
 
     /* ── Charts ── */
-    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 0; }
     @media (max-width: 900px) { .charts { grid-template-columns: 1fr; } }
+    .charts-section { margin-bottom: 20px; }
+    .charts-toggle { width: 100%; min-height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-card); color: var(--text-primary); cursor: pointer; }
+    .charts-toggle-copy { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+    .charts-toggle-icon { width: 10px; height: 10px; border-right: 2px solid var(--text-secondary); border-bottom: 2px solid var(--text-secondary); transform: rotate(45deg); transition: transform 0.18s ease; }
+    .charts-panel { display: grid; grid-template-rows: 1fr; opacity: 1; overflow: hidden; transition: grid-template-rows 0.18s ease, opacity 0.18s ease, margin-top 0.18s ease; margin-top: 12px; }
+    .charts-panel > .charts { min-height: 0; overflow: hidden; }
+    .charts-section.collapsed .charts-panel { grid-template-rows: 0fr; opacity: 0; margin-top: 0; }
+    .charts-section:not(.collapsed) .charts-toggle-icon { transform: rotate(-135deg); }
     .chart-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 16px; backdrop-filter: var(--card-blur); box-shadow: var(--card-shadow); position: relative; overflow: hidden; transition: background-color 0.3s, border-color 0.3s, box-shadow 0.3s; }
     .chart-card::before { content: ""; position: absolute; inset: 0; background: var(--card-gradient); pointer-events: none; }
     .chart-title { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); margin-bottom: 12px; position: relative; z-index: 1; }
@@ -377,16 +412,22 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .filter-tabs { display: flex; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
     .filter-tab { padding: 5px 14px; font-size: 12px; cursor: pointer; color: var(--text-secondary); border: none; background: none; transition: background 0.15s, color 0.15s; }
     .filter-tab.active { background: var(--bg-card-hover); color: var(--text-primary); font-weight: 600; }
+    .view-mode-tabs { display: flex; background: var(--bg-input); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .view-mode-tab { min-height: 34px; padding: 6px 14px; border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; }
+    .view-mode-tab.active { background: var(--bg-card-hover); color: var(--text-primary); font-weight: 600; }
     .search { flex: 1; min-width: 160px; max-width: 280px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 5px 12px; color: var(--text-primary); font-size: 13px; outline: none; transition: border-color 0.15s; }
     .search:focus { border-color: var(--border-focus); }
     .search::placeholder { color: var(--text-muted); }
     .count-badge { margin-left: auto; font-size: 12px; color: var(--text-muted); }
+    .hidden { display: none !important; }
+    .content-stack { min-height: 120px; }
 
     /* ── Log List ── */
     .log-item { border: 1px solid var(--border); border-radius: 10px; background: var(--bg-card); margin-bottom: 6px; overflow: hidden; transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s, background-color 0.3s; }
     .log-item:hover { border-color: var(--border-hover); transform: translateX(2px); box-shadow: 0 0 8px rgba(59,130,246,0.08); }
     .log-item.focused { outline: 2px solid var(--accent-blue); outline-offset: -2px; }
     .log-item.expanded { border-left: 3px solid var(--accent-blue); }
+    .flash-target { box-shadow: 0 0 0 1px rgba(59,130,246,0.45), 0 0 0 8px rgba(59,130,246,0.08); }
     .log-row { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; }
     .log-id { font-size: 11px; color: var(--text-muted); min-width: 36px; font-variant-numeric: tabular-nums; }
     .log-model { flex: 1; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -416,6 +457,26 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .img-link:hover { border-color: var(--border-hover); color: var(--text-primary); }
     .cache-badge { position: absolute; top: 4px; left: 4px; padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; background: rgba(34,197,94,0.85); color: #052e16; }
 
+    /* ── Album View ── */
+    .album-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    @media (max-width: 980px) { .album-list { grid-template-columns: 1fr; } }
+    .album-card { position: relative; overflow: hidden; border-radius: 22px; border: 1px solid var(--border); background: linear-gradient(180deg, rgba(12,18,31,0.98), rgba(8,14,31,0.92)); box-shadow: 0 18px 40px rgba(0,0,0,0.18); transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease; }
+    .album-card:hover { transform: translateY(-2px); border-color: var(--border-hover); box-shadow: 0 24px 50px rgba(0,0,0,0.22); }
+    .album-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 16px 18px 0; }
+    .album-prompt { margin: 14px 18px 0; padding: 14px 16px; border-radius: 18px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); }
+    .album-prompt pre { background: transparent; border: 0; padding: 0; max-height: 180px; }
+    .album-grid { display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.25fr); gap: 14px; padding: 14px 18px 18px; }
+    .album-inputs { display: grid; gap: 10px; }
+    .album-input-thumbs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .album-thumb, .album-result { position: relative; border-radius: 20px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08); background: rgba(255,255,255,0.03); text-decoration: none; }
+    .album-thumb img, .album-result img { width: 100%; display: block; object-fit: cover; }
+    .album-thumb img { min-height: 120px; max-height: 160px; }
+    .album-result { min-height: 280px; }
+    .album-result img { min-height: 280px; }
+    .empty-result { display: grid; place-items: center; color: var(--text-muted); padding: 16px; text-align: center; }
+    .album-actions { padding: 0 18px 18px; display: flex; justify-content: flex-end; }
+    .album-input-empty { color: var(--text-muted); font-size: 12px; margin: 0; padding: 8px 0; }
+
     /* ── FinishReason Bar ── */
     .fr-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; min-height: 0; }
     .fr-label { font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-muted); margin-right: 2px; }
@@ -428,6 +489,14 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     .empty svg { margin-bottom: 12px; }
     .empty p { margin: 0; }
     .status-line { font-size: 12px; color: var(--text-muted); }
+
+    @media (prefers-reduced-motion: reduce) {
+      .charts-panel,
+      .album-card,
+      .log-item,
+      .log-detail,
+      .flash-target { transition: none !important; animation: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -455,24 +524,35 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   </div>
 
   <!-- Charts -->
-  <div class="charts" id="chartsRow">
-    <div class="chart-card">
-      <div class="chart-title">request latency distribution</div>
-      <canvas id="chartDuration"></canvas>
+  <section class="charts-section collapsed" id="chartsSection">
+    <button class="charts-toggle" id="chartsToggle" type="button" aria-expanded="false">
+      <span class="charts-toggle-copy">
+        <strong>趋势图表</strong>
+        <span>4 个趋势图，按需展开</span>
+      </span>
+      <span class="charts-toggle-icon" id="chartsToggleIcon"></span>
+    </button>
+    <div class="charts-panel" id="chartsPanel" aria-hidden="true">
+      <div class="charts" id="chartsRow">
+        <div class="chart-card">
+          <div class="chart-title">request latency distribution</div>
+          <canvas id="chartDuration"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">model usage</div>
+          <canvas id="chartModels"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">status code distribution</div>
+          <canvas id="chartStatus"></canvas>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">request timeline</div>
+          <canvas id="chartTimeline"></canvas>
+        </div>
+      </div>
     </div>
-    <div class="chart-card">
-      <div class="chart-title">model usage</div>
-      <canvas id="chartModels"></canvas>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">status code distribution</div>
-      <canvas id="chartStatus"></canvas>
-    </div>
-    <div class="chart-card">
-      <div class="chart-title">request timeline</div>
-      <canvas id="chartTimeline"></canvas>
-    </div>
-  </div>
+  </section>
 
   <!-- Toolbar -->
   <div class="toolbar">
@@ -480,6 +560,10 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       <button class="filter-tab active" data-filter="all">All</button>
       <button class="filter-tab" data-filter="ok">2xx</button>
       <button class="filter-tab" data-filter="bad">4xx+</button>
+    </div>
+    <div class="view-mode-tabs" id="viewModeTabs" role="group" aria-label="content view mode">
+      <button class="view-mode-tab active" data-view="list" aria-pressed="true">列表视图</button>
+      <button class="view-mode-tab" data-view="album" aria-pressed="false">相册视图</button>
     </div>
     <input class="search" id="searchBox" type="search" placeholder="search path / model..." />
     <span class="count-badge" id="countBadge"></span>
@@ -489,8 +573,10 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   <!-- FinishReason filter bar -->
   <div id="frBar" class="fr-bar"></div>
 
-  <!-- Log list -->
-  <div id="logList"></div>
+  <div class="content-stack" id="contentStack">
+    <div id="logList"></div>
+    <div id="albumList" class="album-list hidden" aria-live="polite"></div>
+  </div>
 </main>
 <script>
 /* Chart.js v4.5.1 - MIT License - https://www.chartjs.org/ */
@@ -513,6 +599,11 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 <script>
 (function () {
   'use strict';
+
+  var STORAGE_KEYS = {
+    viewMode: 'admin:viewMode',
+    chartsCollapsed: 'admin:chartsCollapsed'
+  };
 
   // ── Theme ──────────────────────────────────────────
   var SUN_SVG = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
@@ -545,21 +636,63 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     applyTheme(current === 'dark' ? 'light' : 'dark', true);
   });
 
+  // ── API base URL (strip embedded credentials to avoid fetch() TypeError) ──
+  var apiBase = location.protocol + '//' + location.host;
+
   // ── State ──────────────────────────────────────────
   var allItems = [];
   var filterMode = 'all';
   var finishReasonFilter = 'all';
   var searchText = '';
+  var preservedListContext = null;
+  var pendingScrollTargetId = null;
+  var viewMode = readViewMode();
+  var chartsCollapsed = readChartsCollapsed();
   var autoTimer = null;
 
   // ── DOM refs ───────────────────────────────────────
+  var chartsSection = document.getElementById('chartsSection');
+  var chartsToggle = document.getElementById('chartsToggle');
+  var chartsPanel = document.getElementById('chartsPanel');
   var elList    = document.getElementById('logList');
+  var elAlbum   = document.getElementById('albumList');
   var elStatus  = document.getElementById('statusLine');
   var elCount   = document.getElementById('countBadge');
   var elSearch  = document.getElementById('searchBox');
   var chkAuto   = document.getElementById('autoRefreshChk');
   var btnRef    = document.getElementById('btnRefresh');
   var pulseDot  = document.getElementById('pulseDot');
+
+  function readViewMode() {
+    var stored = localStorage.getItem(STORAGE_KEYS.viewMode);
+    return stored === 'album' ? 'album' : 'list';
+  }
+
+  function readChartsCollapsed() {
+    var stored = localStorage.getItem(STORAGE_KEYS.chartsCollapsed);
+    return stored === null ? true : stored === 'true';
+  }
+
+  function setViewMode(mode, persist) {
+    viewMode = mode === 'album' ? 'album' : 'list';
+    if (persist) localStorage.setItem(STORAGE_KEYS.viewMode, viewMode);
+  }
+
+  function setChartsCollapsed(collapsed, persist) {
+    chartsCollapsed = !!collapsed;
+    if (persist) localStorage.setItem(STORAGE_KEYS.chartsCollapsed, String(chartsCollapsed));
+    if (chartsSection) chartsSection.classList.toggle('collapsed', chartsCollapsed);
+    if (chartsToggle) chartsToggle.setAttribute('aria-expanded', String(!chartsCollapsed));
+    if (chartsPanel) chartsPanel.setAttribute('aria-hidden', String(chartsCollapsed));
+  }
+
+  function syncViewModeTabs() {
+    document.querySelectorAll('.view-mode-tab').forEach(function (node) {
+      var active = node.dataset.view === viewMode;
+      node.classList.toggle('active', active);
+      node.setAttribute('aria-pressed', String(active));
+    });
+  }
 
   // ── Helpers ────────────────────────────────────────
   function esc(s) {
@@ -580,6 +713,32 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     return Number(n).toLocaleString('zh-CN');
   }
 
+  function truncateText(text, max) {
+    if (!text) return '';
+    var raw = String(text);
+    if (raw.length <= max) return raw;
+    return raw.slice(0, Math.max(0, max)) + '…';
+  }
+
+  function extractPromptText(item) {
+    var raw = item && item.requestRaw ? item.requestRaw : '';
+    if (!raw) return '';
+    try {
+      var parsed = JSON.parse(raw);
+      var lines = [];
+      (parsed.contents || []).forEach(function (content) {
+        (content.parts || []).forEach(function (part) {
+          if (part && typeof part.text === 'string' && part.text.trim()) {
+            lines.push(part.text.trim());
+          }
+        });
+      });
+      if (lines.length) return lines.join('\n');
+      if (parsed && typeof parsed === 'object') return '';
+      return '';
+    } catch (_) { return truncateText(raw, 280); }
+  }
+
   function relTime(iso) {
     var diff = Date.now() - new Date(iso).getTime();
     var s = Math.round(diff/1000);
@@ -595,6 +754,10 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   function extractModel(path) {
     var m = path && path.match(/models\/([^/:]+)/);
     return m ? m[1] : (path || '');
+  }
+
+  function prefersReducedMotion() {
+    return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   }
 
   // ── Animate Value ──────────────────────────────────
@@ -615,7 +778,7 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 
   // ── Stats ──────────────────────────────────────────
   function loadStats() {
-    return fetch('/admin/api/stats', { cache: 'no-store' })
+    return fetch(apiBase + '/admin/api/stats', { cache: 'no-store' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (d) {
         var total = d.totalRequests || 0;
@@ -751,6 +914,10 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     return !!u && u.startsWith('/proxy/image');
   }
 
+  function canPreviewAlbumImageUrl(u) {
+    return !!safeUrl(u);
+  }
+
   function renderImgs(urls, hits) {
     if (!urls || !urls.length) return '';
     var hitSet = {};
@@ -809,6 +976,18 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
       + '</div>';
   }
 
+  function openLogItem(el) {
+    var item = el.__item || null;
+    if (!item) return;
+    var d = el.querySelector('.log-detail');
+    if (!d.dataset.rendered) {
+      d.innerHTML = buildDetailMarkup(item);
+      d.dataset.rendered = '1';
+    }
+    d.classList.add('open');
+    el.classList.add('expanded');
+  }
+
   function buildRow(item) {
     var model  = extractModel(item.path);
     var isOk   = item.statusCode >= 200 && item.statusCode < 400;
@@ -838,6 +1017,8 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
 
     var el = document.createElement('div');
     el.className = 'log-item';
+    el.dataset.itemId = String(item.id);
+    el.__item = item;
     el.dataset.status = isOk ? 'ok' : 'bad';
     el.dataset.fr = fr;
     el.dataset.search = (model + ' ' + item.path + ' ' + item.statusCode + ' ' + fr).toLowerCase();
@@ -845,12 +1026,12 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     el.querySelector('.log-row').addEventListener('click', function () {
       var d = el.querySelector('.log-detail');
       var isOpen = d.classList.contains('open');
-      if (!d.dataset.rendered) {
-        d.innerHTML = buildDetailMarkup(item);
-        d.dataset.rendered = '1';
+      if (isOpen) {
+        d.classList.remove('open');
+        el.classList.remove('expanded');
+      } else {
+        openLogItem(el);
       }
-      d.classList.toggle('open');
-      el.classList.toggle('expanded');
       if (!isOpen) {
         setTimeout(function () { el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 50);
       }
@@ -858,23 +1039,149 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     return el;
   }
 
-  function applyFilter() {
+  function matchesFilters(item) {
+    var model = extractModel(item.path);
+    var fr = (item.finishReason || '').toUpperCase();
     var q = searchText.toLowerCase();
-    var shown = 0;
-    var items = elList.querySelectorAll('.log-item');
-    items.forEach(function (el) {
-      var matchFilter = filterMode === 'all'
-        || (filterMode === 'ok'  && el.dataset.status === 'ok')
-        || (filterMode === 'bad' && el.dataset.status === 'bad');
-      var matchFr = finishReasonFilter === 'all' || el.dataset.fr === finishReasonFilter;
-      var matchSearch = !q || el.dataset.search.includes(q);
-      var visible = matchFilter && matchFr && matchSearch;
-      el.style.display = visible ? '' : 'none';
-      if (visible) shown++;
-    });
-    elCount.textContent = shown === allItems.length
-      ? shown + ' total'
-      : shown + ' / ' + allItems.length;
+    var isOk = item.statusCode >= 200 && item.statusCode < 400;
+    var matchFilter = filterMode === 'all'
+      || (filterMode === 'ok' && isOk)
+      || (filterMode === 'bad' && !isOk);
+    var matchFr = finishReasonFilter === 'all' || fr === finishReasonFilter;
+    var haystack = (model + ' ' + item.path + ' ' + item.statusCode + ' ' + fr).toLowerCase();
+    var matchSearch = !q || haystack.includes(q);
+    return matchFilter && matchFr && matchSearch;
+  }
+
+  function getFilteredItems() {
+    return allItems.filter(matchesFilters);
+  }
+
+  function updateCount(shown, total) {
+    elCount.textContent = shown === total ? shown + ' total' : shown + ' / ' + total;
+  }
+
+  function renderList(items) {
+    elList.innerHTML = '';
+    if (!items.length) {
+      var emptyCopy = allItems.length === 0 ? 'no requests yet' : 'no matching requests';
+      elList.innerHTML = '<div class="empty"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg><p>' + emptyCopy + '</p></div>';
+      return;
+    }
+    var frag = document.createDocumentFragment();
+    items.forEach(function (it) { frag.appendChild(buildRow(it)); });
+    elList.appendChild(frag);
+  }
+
+  function buildAlbumTags(item) {
+    var isOk = item.statusCode >= 200 && item.statusCode < 400;
+    var parts = [
+      isOk
+        ? '<span class="tag tag-ok">' + esc(item.statusCode) + '</span>'
+        : '<span class="tag tag-bad">' + esc(item.statusCode) + '</span>'
+    ];
+    if (item.isStream) parts.push('<span class="tag tag-stream">stream</span>');
+    if (item.finishReason) parts.push('<span class="tag tag-fr">' + esc(String(item.finishReason).toUpperCase()) + '</span>');
+    if ((item.durationMs || 0) > 5000) parts.push('<span class="tag tag-slow">slow</span>');
+    return parts.join('');
+  }
+
+  function renderAlbumThumb(url, cacheHit, alt) {
+    var safe = safeUrl(url);
+    if (!safe) return '';
+    var canPreviewAlbumThumb = canPreviewAlbumImageUrl(safe);
+    if (!canPreviewAlbumThumb) {
+      return '<a class="img-link" href="' + esc(safe) + '" target="_blank" rel="noreferrer">external image</a>';
+    }
+    var badge = cacheHit ? '<span class="cache-badge">CACHE</span>' : '';
+    return '<a class="album-thumb" href="' + esc(safe) + '" target="_blank" rel="noreferrer">'
+      + badge
+      + '<img src="' + esc(safe) + '" alt="' + esc(alt) + '" loading="lazy">'
+      + '</a>';
+  }
+
+  function renderAlbumCard(item) {
+    var prompt = extractPromptText(item);
+    var promptPreview = truncateText(prompt, 220);
+    var promptHtml = prompt
+      ? '<div class="album-prompt"><div class="detail-col-label">prompt</div><pre>' + esc(promptPreview) + '</pre></div>'
+      : '';
+    var hitSet = {};
+    (item.requestRawImageCacheHits || []).forEach(function (hit) { hitSet[hit] = true; });
+    var requestThumbs = (item.requestRawImages || []).map(function (url, idx) {
+      return renderAlbumThumb(url, !!hitSet[url], '请求图片 ' + (idx + 1));
+    }).join('');
+    var safeResultUrl = safeUrl((item.responseImages || [])[0] || '');
+    var canPreviewResult = canPreviewAlbumImageUrl(safeResultUrl);
+    var resultHtml = canPreviewResult
+      ? '<a class="album-result" href="' + esc(safeResultUrl) + '" target="_blank" rel="noreferrer"><img src="' + esc(safeResultUrl) + '" alt="生成结果图" loading="lazy"></a>'
+      : safeResultUrl
+      ? '<a class="album-result empty-result" href="' + esc(safeResultUrl) + '" target="_blank" rel="noreferrer"><div class="detail-col-label">result</div><p>external image</p></a>'
+      : '<div class="album-result empty-result"><div class="detail-col-label">result</div><p>暂无结果图</p></div>';
+    var inputHtml = requestThumbs || '<p class="album-input-empty">暂无请求图</p>';
+
+    return '<article class="album-card" data-item-id="' + esc(item.id) + '">'
+      + '<div class="album-head"><div><strong>#' + esc(item.id) + '</strong><div class="stat-sub">' + esc(new Date(item.createdAt).toLocaleString('zh-CN')) + '</div></div>'
+      + '<div class="log-meta">' + buildAlbumTags(item) + '<span class="log-dur">' + fmtDur(item.durationMs) + '</span></div></div>'
+      + promptHtml
+      + '<div class="album-grid"><div class="album-inputs"><div class="detail-col-label">request images</div><div class="album-input-thumbs">' + inputHtml + '</div></div>'
+      + '<div><div class="detail-col-label">result</div>' + resultHtml + '</div></div>'
+      + '<div class="album-actions"><button class="btn jump-to-log-btn" data-log-id="' + esc(item.id) + '">查看对应记录</button></div>'
+      + '</article>';
+  }
+
+  function renderAlbum(items) {
+    elAlbum.innerHTML = '';
+    if (!items.length) {
+      var albumEmptyCopy = allItems.length === 0 ? 'no requests yet' : 'no matching requests';
+      elAlbum.innerHTML = '<div class="empty"><p>' + albumEmptyCopy + '</p></div>';
+      return;
+    }
+    elAlbum.innerHTML = items.map(renderAlbumCard).join('');
+  }
+
+  function jumpToListItem(itemId) {
+    pendingScrollTargetId = String(itemId);
+    setViewMode('list', true);
+    syncViewModeTabs();
+    rerenderContent();
+  }
+
+  function flushPendingScrollTarget() {
+    if (!pendingScrollTargetId) return;
+    var target = document.querySelector('.log-item[data-item-id="' + pendingScrollTargetId + '"]');
+    if (!target) {
+      console.warn('[admin] target log item is filtered out:', pendingScrollTargetId);
+      pendingScrollTargetId = null;
+      return;
+    }
+    openLogItem(target);
+    target.classList.add('flash-target');
+    var scrollBehavior = prefersReducedMotion() ? 'auto' : 'smooth';
+    target.scrollIntoView({ block: 'center', behavior: scrollBehavior });
+    setTimeout(function () { target.classList.remove('flash-target'); }, 1500);
+    pendingScrollTargetId = null;
+  }
+
+  function renderMainContent(items) {
+    var isAlbum = viewMode === 'album';
+    elList.classList.toggle('hidden', isAlbum);
+    elAlbum.classList.toggle('hidden', !isAlbum);
+    if (isAlbum) renderAlbum(items);
+    else renderList(items);
+  }
+
+  function rerenderContent() {
+    var filtered = getFilteredItems();
+    var listContext = snapshotListContext();
+    if (listContext && (listContext.expandedIds.length || listContext.renderedIds.length || listContext.focusedId)) preservedListContext = listContext;
+    else listContext = preservedListContext;
+    renderMainContent(filtered);
+    if (viewMode === 'list') {
+      restoreListContext(listContext, filtered);
+      flushPendingScrollTarget();
+    }
+    updateCount(filtered.length, allItems.length);
   }
 
   // ── FinishReason Bar ───────────────────────────────
@@ -901,28 +1208,20 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
         finishReasonFilter = btn.dataset.reason;
         frBar.querySelectorAll('.fr-btn').forEach(function (b) { b.classList.remove('active'); });
         btn.classList.add('active');
-        applyFilter();
+        rerenderContent();
       });
     });
   }
 
   function loadLogs() {
     elStatus.textContent = 'loading...';
-    return fetch('/admin/api/logs', { cache: 'no-store' })
+    return fetch(apiBase + '/admin/api/logs', { cache: 'no-store' })
       .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(function (d) {
         allItems = (d && d.items) || [];
-        elList.innerHTML = '';
-        if (!allItems.length) {
-          elList.innerHTML = '<div class="empty"><svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg><p>no requests yet</p></div>';
-        } else {
-          var frag = document.createDocumentFragment();
-          allItems.forEach(function (it) { frag.appendChild(buildRow(it)); });
-          elList.appendChild(frag);
-        }
         rebuildFrBar();
         renderCharts(allItems);
-        applyFilter();
+        rerenderContent();
         elStatus.textContent = 'updated ' + new Date().toLocaleTimeString('zh-CN');
       })
       .catch(function (e) {
@@ -950,25 +1249,49 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
   });
 
   // ── Filter tabs ────────────────────────────────────
+  document.querySelectorAll('.view-mode-tab').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      setViewMode(btn.dataset.view, true);
+      syncViewModeTabs();
+      rerenderContent();
+    });
+  });
+
+  elAlbum.addEventListener('click', function (e) {
+    var button = e.target.closest('.jump-to-log-btn');
+    if (!button) return;
+    jumpToListItem(button.dataset.logId);
+  });
+
+  if (chartsToggle) {
+    chartsToggle.addEventListener('click', function () {
+      setChartsCollapsed(!chartsCollapsed, true);
+    });
+  }
+
+  syncViewModeTabs();
+  setChartsCollapsed(chartsCollapsed, false);
+
   document.querySelectorAll('.filter-tab').forEach(function (btn) {
     btn.addEventListener('click', function () {
       document.querySelectorAll('.filter-tab').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
       filterMode = btn.dataset.filter;
-      applyFilter();
+      rerenderContent();
     });
   });
 
   // ── Search ─────────────────────────────────────────
   elSearch.addEventListener('input', function () {
     searchText = elSearch.value;
-    applyFilter();
+    rerenderContent();
   });
 
   // ── Keyboard Navigation ────────────────────────────
   var focusIndex = -1;
 
   function getVisibleItems() {
+    if (viewMode !== 'list') return [];
     return Array.from(elList.querySelectorAll('.log-item')).filter(function (el) { return el.style.display !== 'none'; });
   }
 
@@ -982,22 +1305,74 @@ const ADMIN_LOGS_HTML: &str = r##"<!doctype html>
     visible[focusIndex].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
+  function isInteractiveControlTarget(el) {
+    if (!el || typeof el.closest !== 'function') return false;
+    return !!el.closest('button, a, input, select, textarea');
+  }
+
+  function snapshotListContext() {
+    if (!elList) return null;
+    var snapshot = { expandedIds: [], renderedIds: [], focusedId: '' };
+    elList.querySelectorAll('.log-item').forEach(function (row) {
+      var id = row.dataset.itemId;
+      if (!id) return;
+      var detail = row.querySelector('.log-detail');
+      if (detail && detail.dataset.rendered) snapshot.renderedIds.push(id);
+      if (row.classList.contains('expanded')) snapshot.expandedIds.push(id);
+      if (row.classList.contains('focused')) snapshot.focusedId = id;
+    });
+    if (!snapshot.expandedIds.length && !snapshot.renderedIds.length && !snapshot.focusedId) return null;
+    return snapshot;
+  }
+
+  function restoreListContext(snapshot, items) {
+    if (viewMode !== 'list' || !snapshot || !elList) return;
+    var byId = {};
+    items.forEach(function (item) { byId[String(item.id)] = item; });
+    var nextFocusIndex = -1;
+    var visible = getVisibleItems();
+    visible.forEach(function (row, idx) {
+      var id = row.dataset.itemId;
+      if (!id) return;
+      var detail = row.querySelector('.log-detail');
+      var shouldRender = snapshot.renderedIds.indexOf(id) !== -1 || snapshot.expandedIds.indexOf(id) !== -1;
+      var shouldExpand = snapshot.expandedIds.indexOf(id) !== -1;
+      if (detail && shouldRender && !detail.dataset.rendered && byId[id]) {
+        detail.innerHTML = buildDetailMarkup(byId[id]);
+        detail.dataset.rendered = '1';
+      }
+      if (detail && shouldExpand) {
+        detail.classList.add('open');
+        row.classList.add('expanded');
+      }
+      if (snapshot.focusedId === id) {
+        row.classList.add('focused');
+        nextFocusIndex = idx;
+      }
+    });
+    focusIndex = nextFocusIndex;
+  }
+
   document.addEventListener('keydown', function (e) {
     if (document.activeElement === elSearch) {
       if (e.key === 'Escape') { elSearch.blur(); e.preventDefault(); }
       return;
     }
+    var listOnlyKey = e.key === 'j' || e.key === 'k' || e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ';
+    if (listOnlyKey && viewMode !== 'list') return;
     var visible = getVisibleItems();
     switch (e.key) {
       case 'j': case 'ArrowDown': e.preventDefault(); setFocus(focusIndex + 1); break;
       case 'k': case 'ArrowUp':   e.preventDefault(); setFocus(focusIndex - 1); break;
       case 'Enter': case ' ':
+        if (isInteractiveControlTarget(document.activeElement)) return;
         e.preventDefault();
         if (focusIndex >= 0 && focusIndex < visible.length) {
           visible[focusIndex].querySelector('.log-row').click();
         }
         break;
       case 'Escape':
+        if (viewMode !== 'list') return;
         e.preventDefault();
         elList.querySelectorAll('.log-detail.open').forEach(function (d) { d.classList.remove('open'); d.closest('.log-item').classList.remove('expanded'); });
         break;
@@ -1045,6 +1420,15 @@ pub fn admin_stats_response(
         total_requests: stats.total_requests.load(Ordering::Relaxed),
         error_requests: stats.error_requests.load(Ordering::Relaxed),
         total_duration_ms: stats.total_duration_ms.load(Ordering::Relaxed),
+        request_parse_ms: stats.request_parse_ms.load(Ordering::Relaxed),
+        request_image_prepare_ms: stats.request_image_prepare_ms.load(Ordering::Relaxed),
+        request_image_materialize_ms: stats.request_image_materialize_ms.load(Ordering::Relaxed),
+        request_image_fetch_work_ms: stats.request_image_fetch_work_ms.load(Ordering::Relaxed),
+        request_image_store_work_ms: stats.request_image_store_work_ms.load(Ordering::Relaxed),
+        request_encode_ms: stats.request_encode_ms.load(Ordering::Relaxed),
+        upstream_build_ms: stats.upstream_build_ms.load(Ordering::Relaxed),
+        response_process_ms: stats.response_process_ms.load(Ordering::Relaxed),
+        upload_ms: stats.upload_ms.load(Ordering::Relaxed),
         cache_hits: stats.cache_hits.load(Ordering::Relaxed),
         spill_count: runtime_stats.spill_count,
         spill_bytes_total: runtime_stats.spill_bytes_total,
@@ -1102,6 +1486,33 @@ pub fn apply_admin_stats(stats: &AdminStats, entry: &AdminLogEntry) {
     stats
         .total_duration_ms
         .fetch_add(entry.duration_ms, Ordering::Relaxed);
+    stats
+        .request_parse_ms
+        .fetch_add(entry.request_parse_ms, Ordering::Relaxed);
+    stats
+        .request_image_prepare_ms
+        .fetch_add(entry.request_image_prepare_ms, Ordering::Relaxed);
+    stats
+        .request_image_materialize_ms
+        .fetch_add(entry.request_image_materialize_ms, Ordering::Relaxed);
+    stats
+        .request_image_fetch_work_ms
+        .fetch_add(entry.request_image_fetch_work_ms, Ordering::Relaxed);
+    stats
+        .request_image_store_work_ms
+        .fetch_add(entry.request_image_store_work_ms, Ordering::Relaxed);
+    stats
+        .request_encode_ms
+        .fetch_add(entry.request_encode_ms, Ordering::Relaxed);
+    stats
+        .upstream_build_ms
+        .fetch_add(entry.upstream_build_ms, Ordering::Relaxed);
+    stats
+        .response_process_ms
+        .fetch_add(entry.response_process_ms, Ordering::Relaxed);
+    stats
+        .upload_ms
+        .fetch_add(entry.upload_ms, Ordering::Relaxed);
 }
 
 pub fn extract_finish_reason(body: &Value) -> Option<String> {

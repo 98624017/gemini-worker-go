@@ -105,8 +105,16 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `x-goog-api-key: <baseUrl>|<apiKey>`
 - `Authorization: Bearer <apiKey>`
 - `Authorization: Bearer <baseUrl>|<apiKey>`
+- `x-goog-api-key: <baseUrl1>|<apiKey1>,<baseUrl2>|<apiKey2>`
+- `Authorization: Bearer <baseUrl1>|<apiKey1>,<baseUrl2>|<apiKey2>`
 
-当前 Rust 版支持单上游覆盖，不支持 Go 版的双上游 `baseUrl1|key1,baseUrl2|key2` 路由格式。
+双上游仅支持**请求头覆盖**，不支持通过环境变量配置双 key。
+
+行为规则：
+
+- 默认使用第 1 组 `baseUrl1/apiKey1`
+- 仅当请求体 `generationConfig.imageConfig.imageSize` 为 `4k` 或 `4K` 时，切到第 2 组 `baseUrl2/apiKey2`
+- token 含逗号但不能解析成两组合法 `<baseUrl>|<apiKey>` 时，请求返回 `400`
 
 ### 图片代理
 
@@ -143,9 +151,10 @@ export MALLOC_CONF="background_thread:true,dirty_decay_ms:100,muzzy_decay_ms:100
 - `IMAGE_FETCH_EXTERNAL_PROXY_DOMAINS`
   命中时改走外部代理抓图
   响应侧按 URL 拉图转 base64 时，单张图片默认最大 `35MiB`
-  标准链路请求侧按 URL 拉图时，单张图片默认最大 `20MiB`；若抓到的 PNG
-  大于 `10MiB`，会先尝试无损转成 `image/webp` 再发往真实上游，并把这版字节
-  写入请求侧缓存
+- `ENABLE_REQUEST_IMAGE_WEBP_OPTIMIZATION`
+  默认关闭；开启后，标准链路请求侧按 URL 拉图时，单张图片默认最大 `20MiB`；
+  若抓到的 PNG 大于 `10MiB`，会先尝试无损转成 `image/webp` 再发往真实上游，
+  并把这版字节写入请求侧缓存
 - `INLINE_DATA_URL_CACHE_DIR`
   非空时启用请求侧磁盘缓存
 - `INLINE_DATA_URL_CACHE_TTL_MS`
@@ -354,6 +363,7 @@ sed -n '1,240p' docs/plans/2026-04-09-generate-content-memory-redesign-benchmark
 ```bash
 python3 scripts/benchmark_docker_mock_upstream.py \
   --image rust-sync-proxy:jemalloc-test \
+  --output-mode url \
   --image-url "https://example.com/7mb-a.png" \
   --image-url "https://example.com/7mb-b.png" \
   --image-url "https://example.com/7mb-c.png" \
@@ -361,6 +371,17 @@ python3 scripts/benchmark_docker_mock_upstream.py \
   --total-requests 4 \
   --cooldown-seconds 30
 ```
+
+四组图片重路径样本可以直接用这两个开关组合：
+
+- `--output-mode base64` + 不带 `--warm-cache`
+  - `miss/base64`
+- `--output-mode base64 --warm-cache`
+  - `hit/base64`
+- `--output-mode url` + 不带 `--warm-cache`
+  - `miss/url`
+- `--output-mode url --warm-cache`
+  - `hit/url`
 
 这条脚本的边界是：
 
@@ -376,6 +397,37 @@ python3 scripts/benchmark_docker_mock_upstream.py \
 - `rss-samples.csv`
 - `stats-samples.csv`
 - `requests.csv`
+
+其中 benchmark 现在会顺序跑两轮同样的请求：
+
+- `direct`：直打本地 mock upstream
+- `proxy`：经过 `rust-sync-proxy`
+
+`summary.json` 会额外给出这三个对照字段：
+
+- `direct_total_ms`
+  - 直连上游成功请求的平均总耗时
+- `proxy_total_ms`
+  - 经过代理成功请求的平均总耗时
+- `proxy_overhead_ms`
+  - `proxy_total_ms - direct_total_ms`
+
+正式跑基线时，还可以直接看这些分位统计：
+
+- `direct_p50_ms`
+- `proxy_p50_ms`
+- `proxy_overhead_p50_ms`
+- `direct_p95_ms`
+- `proxy_p95_ms`
+- `proxy_overhead_p95_ms`
+
+同时也会标明当前这次 run 属于哪个样本：
+
+- `scenario`
+- `cacheState`
+- `outputMode`
+
+`requests.csv` 现在会多一个 `target` 列，用来区分这条记录属于 `direct` 还是 `proxy`。
 
 跑 Go/Rust 对照：
 
