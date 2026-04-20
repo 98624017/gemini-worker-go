@@ -243,6 +243,35 @@ func TestGetTaskByIDLoadsRequestProtocol(t *testing.T) {
 	}
 }
 
+func TestGetTaskByIDDefaultsEmptyRequestProtocol(t *testing.T) {
+	t.Parallel()
+
+	repo, mock := newRepositoryForTest(t)
+	createdAt := time.Date(2026, 3, 19, 10, 0, 0, 0, time.UTC)
+	updatedAt := createdAt.Add(5 * time.Second)
+
+	rows := mock.NewRows([]string{
+		"task_id", "status", "model", "owner_hash", "request_path", "request_query",
+		"request_protocol", "worker_id", "heartbeat_at", "request_dispatched_at", "result_summary_json",
+		"error_code", "error_message", "transport_uncertain", "created_at", "updated_at", "finished_at",
+	}).AddRow(
+		"task-1", "accepted", "gemini-3-pro-image-preview", "owner", "/v1beta/models/gemini-3-pro-image-preview:generateContent", "output=url", "",
+		"", nil, nil, []byte(`{}`), "", "", false, createdAt, updatedAt, nil,
+	)
+
+	mock.ExpectQuery(regexp.QuoteMeta(getTaskByIDSQL)).
+		WithArgs("task-1").
+		WillReturnRows(rows)
+
+	task, err := repo.GetTaskByID(context.Background(), "task-1")
+	if err != nil {
+		t.Fatalf("GetTaskByID() error = %v", err)
+	}
+	if task.RequestProtocol != domain.RequestProtocolGeminiGenerateContent {
+		t.Fatalf("task.RequestProtocol = %q, want %q", task.RequestProtocol, domain.RequestProtocolGeminiGenerateContent)
+	}
+}
+
 func TestRepositoryGetTasksByIDs(t *testing.T) {
 	t.Parallel()
 
@@ -299,6 +328,9 @@ func TestRepositoryGetTasksByIDs(t *testing.T) {
 		}
 		if task.ResultSummary == nil || len(task.ResultSummary.ImageURLs) != 1 {
 			t.Fatalf("expected parsed result summary, got %#v", task.ResultSummary)
+		}
+		if task.RequestProtocol != domain.RequestProtocolGeminiGenerateContent {
+			t.Fatalf("task-1 request protocol = %q, want %q", task.RequestProtocol, domain.RequestProtocolGeminiGenerateContent)
 		}
 		if _, ok := tasks["task-2"]; ok {
 			t.Fatalf("task-2 should be absent from result map: %#v", tasks)
@@ -358,6 +390,12 @@ func TestFindRecoverableTasks(t *testing.T) {
 	}
 	if len(items) != 1 || !items[0].HasPayload {
 		t.Fatalf("unexpected recoverable items = %#v", items)
+	}
+	if items[0].Task == nil {
+		t.Fatalf("recoverable task is nil: %#v", items[0])
+	}
+	if items[0].Task.RequestProtocol != domain.RequestProtocolGeminiGenerateContent {
+		t.Fatalf("recoverable task request protocol = %q, want %q", items[0].Task.RequestProtocol, domain.RequestProtocolGeminiGenerateContent)
 	}
 }
 
