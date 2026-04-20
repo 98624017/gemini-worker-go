@@ -9,6 +9,7 @@ import { downloadSingleImage } from "../utils/download";
 import {
   extractImageURLs,
   extractTextContent,
+  extractUsageMetadata,
   type TaskDetailResponse,
 } from "../api/client";
 
@@ -69,6 +70,7 @@ export function TaskDetail({
 
   const imageURLs = extractImageURLs(detail);
   const textContent = extractTextContent(detail);
+  const usageMetadata = extractUsageMetadata(detail);
 
   return (
     <div key={animKey} ref={containerRef} className="h-full overflow-y-auto p-4 space-y-4 animate-detail-enter">
@@ -141,9 +143,7 @@ export function TaskDetail({
           />
         )}
 
-      {detail.usage_metadata && (
-        <MetadataPanel metadata={detail.usage_metadata} />
-      )}
+      {usageMetadata && <MetadataPanel metadata={usageMetadata} />}
     </div>
   );
 }

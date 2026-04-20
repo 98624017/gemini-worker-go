@@ -77,6 +77,16 @@ export interface TaskDetailCandidate {
   finishReason: string;
 }
 
+export interface TaskDetailResultImage {
+  url: string;
+}
+
+export interface TaskDetailResult {
+  created: number;
+  data: TaskDetailResultImage[];
+  usage?: Record<string, unknown>;
+}
+
 export interface TaskDetailResponse {
   id: string;
   object: string;
@@ -88,6 +98,7 @@ export interface TaskDetailResponse {
   model_version?: string;
   usage_metadata?: Record<string, unknown>;
   candidates?: TaskDetailCandidate[];
+  result?: TaskDetailResult;
   error?: { code: string; message: string };
   transport_uncertain?: boolean;
 }
@@ -121,6 +132,11 @@ export function fetchTaskDetail(
 
 /** Extract image URLs from task detail response */
 export function extractImageURLs(detail: TaskDetailResponse): string[] {
+  if (detail.result?.data) {
+    return detail.result.data
+      .map((item) => item.url)
+      .filter((url): url is string => typeof url === "string" && url.length > 0);
+  }
   if (!detail.candidates) return [];
   const urls: string[] = [];
   for (const candidate of detail.candidates) {
@@ -145,6 +161,13 @@ export function extractTextContent(detail: TaskDetailResponse): string {
     }
   }
   return texts.join("\n");
+}
+
+export function extractUsageMetadata(
+  detail: TaskDetailResponse
+): Record<string, unknown> | null {
+  if (detail.result?.usage) return detail.result.usage;
+  return detail.usage_metadata ?? null;
 }
 
 export interface BatchGetResponse {
