@@ -186,7 +186,7 @@ func cloneResultSummary(summary *domain.ResultSummary) *domain.ResultSummary {
 	if len(summary.UsageMetadata) > 0 {
 		cloned.UsageMetadata = make(map[string]any, len(summary.UsageMetadata))
 		for key, value := range summary.UsageMetadata {
-			cloned.UsageMetadata[key] = value
+			cloned.UsageMetadata[key] = cloneDynamicValue(value)
 		}
 	}
 	if summary.OpenAIImageResult != nil {
@@ -199,9 +199,28 @@ func cloneResultSummary(summary *domain.ResultSummary) *domain.ResultSummary {
 		if len(summary.OpenAIImageResult.Usage) > 0 {
 			cloned.OpenAIImageResult.Usage = make(map[string]any, len(summary.OpenAIImageResult.Usage))
 			for key, value := range summary.OpenAIImageResult.Usage {
-				cloned.OpenAIImageResult.Usage[key] = value
+				cloned.OpenAIImageResult.Usage[key] = cloneDynamicValue(value)
 			}
 		}
 	}
 	return &cloned
+}
+
+func cloneDynamicValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, item := range typed {
+			cloned[key] = cloneDynamicValue(item)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneDynamicValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
 }

@@ -595,6 +595,34 @@ func TestBuildTaskResponseUsesResultForOpenAIImageTask(t *testing.T) {
 	if usage["total_tokens"] != 321 {
 		t.Fatalf("result.usage.total_tokens = %#v, want %d", usage["total_tokens"], 321)
 	}
+
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+
+	var wire map[string]any
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if _, ok := wire["candidates"]; ok {
+		t.Fatalf("did not expect candidates in JSON response: %#v", wire)
+	}
+	wireResult, ok := wire["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected JSON result payload: %#v", wire)
+	}
+	wireData, ok := wireResult["data"].([]any)
+	if !ok || len(wireData) != 1 {
+		t.Fatalf("unexpected JSON result.data = %#v", wireResult["data"])
+	}
+	first, ok := wireData[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected JSON result.data[0] = %#v", wireData[0])
+	}
+	if first["url"] != "https://example.com/openai-a.png" {
+		t.Fatalf("result.data[0].url = %#v, want %q", first["url"], "https://example.com/openai-a.png")
+	}
 }
 
 func TestGetTaskFailedAndUncertainReturnErrorPayload(t *testing.T) {
