@@ -76,6 +76,35 @@ func TestCreateAcceptedTaskIncludesRequestProtocol(t *testing.T) {
 	}
 }
 
+func TestCreateAcceptedTaskDefaultsEmptyRequestProtocol(t *testing.T) {
+	t.Parallel()
+
+	repo, mock := newRepositoryForTest(t)
+	task, payload := makeAcceptedFixture(t)
+	task.RequestProtocol = ""
+
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(insertTaskSQL)).
+		WithArgs(
+			task.ID,
+			task.Status,
+			task.Model,
+			task.OwnerHash,
+			task.RequestPath,
+			task.RequestQuery,
+			domain.RequestProtocolGeminiGenerateContent,
+		).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectExec(regexp.QuoteMeta(insertTaskPayloadSQL)).
+		WithArgs(payload.TaskID, payload.RequestBodyJSON, payload.ForwardHeaders, payload.AuthorizationCrypt, payload.ExpiresAt).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	if err := repo.CreateAcceptedTask(context.Background(), task, payload); err != nil {
+		t.Fatalf("CreateAcceptedTask() error = %v", err)
+	}
+}
+
 func TestMarkQueued(t *testing.T) {
 	t.Parallel()
 
