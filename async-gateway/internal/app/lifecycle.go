@@ -62,9 +62,15 @@ func runShutdown(
 	workers shutdownWorkers,
 	repo shutdownRepository,
 	shutdownServer func(context.Context) error,
+	extraSubmitGates ...*DrainingSubmitHandler,
 ) error {
 	if submitGate != nil {
 		submitGate.StartDraining()
+	}
+	for _, gate := range extraSubmitGates {
+		if gate != nil {
+			gate.StartDraining()
+		}
 	}
 	if logger != nil {
 		logger.Printf("event=shutdown_drain_started")

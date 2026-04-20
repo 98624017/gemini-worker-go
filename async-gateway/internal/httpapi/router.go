@@ -9,6 +9,7 @@ import (
 type Router struct {
 	logger          *log.Logger
 	submitHandler   http.Handler
+	imageSubmit     http.Handler
 	batchGetHandler http.Handler
 	getTaskHandler  http.Handler
 	listHandler     http.Handler
@@ -17,6 +18,7 @@ type Router struct {
 
 type Handlers struct {
 	SubmitTask    http.Handler
+	ImageSubmit   http.Handler
 	BatchGetTasks http.Handler
 	GetTask       http.Handler
 	ListTasks     http.Handler
@@ -27,6 +29,7 @@ func NewRouter(logger *log.Logger, handlers Handlers) http.Handler {
 	return &Router{
 		logger:          logger,
 		submitHandler:   handlers.SubmitTask,
+		imageSubmit:     handlers.ImageSubmit,
 		batchGetHandler: handlers.BatchGetTasks,
 		getTaskHandler:  handlers.GetTask,
 		listHandler:     handlers.ListTasks,
@@ -38,6 +41,8 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && isGenerateContentPath(r.URL.Path):
 		rt.dispatchOrNotImplemented(rt.submitHandler, w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/images/generations":
+		rt.dispatchOrNotImplemented(rt.imageSubmit, w, r)
 	case r.Method == http.MethodPost && isTaskBatchGetPath(r.URL.Path):
 		rt.dispatchOrNotImplemented(rt.batchGetHandler, w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks":

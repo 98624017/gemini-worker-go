@@ -28,6 +28,7 @@ type App struct {
 	queue      *queue.MemoryQueue
 	workers    *worker.Pool
 	submitGate *DrainingSubmitHandler
+	imageGate  *DrainingSubmitHandler
 	recovery   *recovery.Scanner
 	cleaner    *cleanup.Cleaner
 	metrics    *metrics.Registry
@@ -58,7 +59,13 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 		pool.Close()
 		return nil, err
 	}
+	imageSubmitHandler, err := httpapi.NewImageSubmitHandler(cfg, repository, taskQueue)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
 	submitGate := NewDrainingSubmitHandler(submitHandler, cfg.TaskPollRetryAfterSec)
+	imageGate := NewDrainingSubmitHandler(imageSubmitHandler, cfg.TaskPollRetryAfterSec)
 	queryHandler := httpapi.NewQueryHandler(cfg, repository, queryCache, queryLimiter)
 	workerPool, err := worker.NewPool(cfg, logger, repository, taskQueue)
 	if err != nil {
@@ -76,6 +83,7 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 		queue:      taskQueue,
 		workers:    workerPool,
 		submitGate: submitGate,
+		imageGate:  imageGate,
 		recovery:   recoveryScanner,
 		cleaner:    cleaner,
 		metrics:    metricsRegistry,
@@ -87,6 +95,7 @@ func New(cfg config.Config, logger *log.Logger) (*App, error) {
 			Addr: cfg.ListenAddr,
 			Handler: httpapi.NewRouter(logger, httpapi.Handlers{
 				SubmitTask:    submitGate,
+				ImageSubmit:   imageGate,
 				BatchGetTasks: http.HandlerFunc(queryHandler.BatchGetTasks),
 				GetTask:       http.HandlerFunc(queryHandler.GetTask),
 				ListTasks:     http.HandlerFunc(queryHandler.ListTasks),
@@ -114,7 +123,7 @@ func (a *App) ListenAndServe() error {
 }
 
 func (a *App) Shutdown(ctx context.Context) error {
-	err := runShutdown(ctx, a.logger, a.submitGate, a.workers, a.repository, a.server.Shutdown)
+	err := runShutdown(ctx, a.logger, a.submitGate, a.workers, a.repository, a.server.Shutdown, a.imageGate)
 	if a.bgCancel != nil {
 		a.bgCancel()
 	}
