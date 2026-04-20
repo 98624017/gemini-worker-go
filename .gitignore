@@ -34,3 +34,6 @@ response.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Codex
+.codex
