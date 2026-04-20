@@ -63,10 +63,21 @@ type TaskPayload struct {
 }
 
 type ResultSummary struct {
-	ImageURLs     []string       `json:"image_urls,omitempty"`
-	FinishReason  string         `json:"finish_reason,omitempty"`
-	ModelVersion  string         `json:"model_version,omitempty"`
-	ResponseID    string         `json:"response_id,omitempty"`
-	UsageMetadata map[string]any `json:"usage_metadata,omitempty"`
-	TextSummary   string         `json:"text_summary,omitempty"`
+	ImageURLs         []string           `json:"image_urls,omitempty"`
+	FinishReason      string             `json:"finish_reason,omitempty"`
+	ModelVersion      string             `json:"model_version,omitempty"`
+	ResponseID        string             `json:"response_id,omitempty"`
+	UsageMetadata     map[string]any     `json:"usage_metadata,omitempty"`
+	TextSummary       string             `json:"text_summary,omitempty"`
+	OpenAIImageResult *OpenAIImageResult `json:"openai_image_result,omitempty"`
+}
+
+type OpenAIImageData struct {
+	URL string `json:"url,omitempty"`
+}
+
+type OpenAIImageResult struct {
+	Created int64             `json:"created,omitempty"`
+	Data    []OpenAIImageData `json:"data,omitempty"`
+	Usage   map[string]any    `json:"usage,omitempty"`
 }

@@ -189,5 +189,19 @@ func cloneResultSummary(summary *domain.ResultSummary) *domain.ResultSummary {
 			cloned.UsageMetadata[key] = value
 		}
 	}
+	if summary.OpenAIImageResult != nil {
+		cloned.OpenAIImageResult = &domain.OpenAIImageResult{
+			Created: summary.OpenAIImageResult.Created,
+		}
+		if len(summary.OpenAIImageResult.Data) > 0 {
+			cloned.OpenAIImageResult.Data = append([]domain.OpenAIImageData(nil), summary.OpenAIImageResult.Data...)
+		}
+		if len(summary.OpenAIImageResult.Usage) > 0 {
+			cloned.OpenAIImageResult.Usage = make(map[string]any, len(summary.OpenAIImageResult.Usage))
+			for key, value := range summary.OpenAIImageResult.Usage {
+				cloned.OpenAIImageResult.Usage[key] = value
+			}
+		}
+	}
 	return &cloned
 }

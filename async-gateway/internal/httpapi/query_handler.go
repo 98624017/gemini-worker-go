@@ -308,7 +308,11 @@ func buildTaskResponse(task *domain.Task) map[string]any {
 			if len(task.ResultSummary.UsageMetadata) > 0 {
 				response["usage_metadata"] = task.ResultSummary.UsageMetadata
 			}
-			response["candidates"] = []any{buildSuccessCandidate(task.ResultSummary)}
+			if task.RequestProtocol == domain.RequestProtocolOpenAIImageGeneration {
+				response["result"] = buildOpenAIImageResult(task.ResultSummary)
+			} else {
+				response["candidates"] = []any{buildSuccessCandidate(task.ResultSummary)}
+			}
 		}
 	case domain.TaskStatusFailed, domain.TaskStatusUncertain:
 		response["error"] = map[string]string{
@@ -369,6 +373,21 @@ func buildSuccessCandidate(summary *domain.ResultSummary) map[string]any {
 		},
 		"finishReason": summary.FinishReason,
 	}
+}
+
+func buildOpenAIImageResult(summary *domain.ResultSummary) map[string]any {
+	if summary == nil || summary.OpenAIImageResult == nil {
+		return map[string]any{}
+	}
+
+	result := map[string]any{
+		"created": summary.OpenAIImageResult.Created,
+		"data":    summary.OpenAIImageResult.Data,
+	}
+	if len(summary.OpenAIImageResult.Usage) > 0 {
+		result["usage"] = summary.OpenAIImageResult.Usage
+	}
+	return result
 }
 
 func buildTaskListResponse(days int, items []domain.TaskSummary) map[string]any {

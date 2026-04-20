@@ -159,7 +159,7 @@ func (f *Forwarder) doForward(ctx context.Context, requestURL, authHeader string
 		return classifyHTTPFailure(resp.StatusCode, bodyBytes), false, nil
 	}
 
-	summary, summaryErr := ExtractResultSummary(bodyBytes)
+	summary, summaryErr := ExtractResultSummary(task.RequestProtocol, bodyBytes)
 	if summaryErr != nil {
 		if wroteRequest && strings.Contains(summaryErr.Message, "unexpected end of JSON input") {
 			return ForwardOutcome{

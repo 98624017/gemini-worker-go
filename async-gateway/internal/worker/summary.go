@@ -47,7 +47,16 @@ type responseInlineData struct {
 	Data     string `json:"data"`
 }
 
-func ExtractResultSummary(body []byte) (*domain.ResultSummary, *SummaryError) {
+func ExtractResultSummary(protocol domain.RequestProtocol, body []byte) (*domain.ResultSummary, *SummaryError) {
+	switch protocol {
+	case domain.RequestProtocolOpenAIImageGeneration:
+		return extractOpenAIImageResultSummary(body)
+	default:
+		return extractGeminiResultSummary(body)
+	}
+}
+
+func extractGeminiResultSummary(body []byte) (*domain.ResultSummary, *SummaryError) {
 	var envelope responseEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, &SummaryError{
@@ -90,6 +99,50 @@ func ExtractResultSummary(body []byte) (*domain.ResultSummary, *SummaryError) {
 			Code:    "upstream_error",
 			Message: summary.TextSummary,
 		}
+	}
+
+	return nil, &SummaryError{
+		Code:    "upstream_error",
+		Message: noImageMessage,
+	}
+}
+
+type openAIImageEnvelope struct {
+	Created int64                    `json:"created"`
+	Data    []domain.OpenAIImageData `json:"data"`
+	Usage   map[string]any           `json:"usage"`
+}
+
+func extractOpenAIImageResultSummary(body []byte) (*domain.ResultSummary, *SummaryError) {
+	var envelope openAIImageEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, &SummaryError{
+			Code:    "upstream_error",
+			Message: err.Error(),
+		}
+	}
+
+	summary := &domain.ResultSummary{
+		OpenAIImageResult: &domain.OpenAIImageResult{
+			Created: envelope.Created,
+			Data:    make([]domain.OpenAIImageData, 0, len(envelope.Data)),
+			Usage:   envelope.Usage,
+		},
+	}
+
+	for _, item := range envelope.Data {
+		url := strings.TrimSpace(item.URL)
+		if url == "" {
+			continue
+		}
+		summary.ImageURLs = append(summary.ImageURLs, url)
+		summary.OpenAIImageResult.Data = append(summary.OpenAIImageResult.Data, domain.OpenAIImageData{
+			URL: url,
+		})
+	}
+
+	if len(summary.ImageURLs) > 0 {
+		return summary, nil
 	}
 
 	return nil, &SummaryError{

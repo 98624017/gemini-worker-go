@@ -547,6 +547,56 @@ func TestGetTaskSucceededReturnsCandidateSummary(t *testing.T) {
 	}
 }
 
+func TestBuildTaskResponseUsesResultForOpenAIImageTask(t *testing.T) {
+	t.Parallel()
+
+	response := buildTaskResponse(&domain.Task{
+		ID:              "task-openai-1",
+		Status:          domain.TaskStatusSucceeded,
+		Model:           "gpt-image-1",
+		RequestProtocol: domain.RequestProtocolOpenAIImageGeneration,
+		CreatedAt:       time.Unix(1773964800, 0).UTC(),
+		ResultSummary: &domain.ResultSummary{
+			ImageURLs: []string{"https://example.com/openai-a.png"},
+			OpenAIImageResult: &domain.OpenAIImageResult{
+				Created: 1710000000,
+				Data: []domain.OpenAIImageData{
+					{URL: "https://example.com/openai-a.png"},
+				},
+				Usage: map[string]any{
+					"total_tokens": 321,
+				},
+			},
+		},
+	})
+
+	if _, ok := response["candidates"]; ok {
+		t.Fatalf("did not expect candidates in response: %#v", response)
+	}
+
+	result, ok := response["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected result payload: %#v", response)
+	}
+	if result["created"] != int64(1710000000) {
+		t.Fatalf("result.created = %#v, want %d", result["created"], 1710000000)
+	}
+	data, ok := result["data"].([]domain.OpenAIImageData)
+	if !ok || len(data) != 1 {
+		t.Fatalf("unexpected result.data = %#v", result["data"])
+	}
+	if data[0].URL != "https://example.com/openai-a.png" {
+		t.Fatalf("result.data[0].url = %q, want %q", data[0].URL, "https://example.com/openai-a.png")
+	}
+	usage, ok := result["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected result.usage = %#v", result["usage"])
+	}
+	if usage["total_tokens"] != 321 {
+		t.Fatalf("result.usage.total_tokens = %#v, want %d", usage["total_tokens"], 321)
+	}
+}
+
 func TestGetTaskFailedAndUncertainReturnErrorPayload(t *testing.T) {
 	t.Parallel()
 
